@@ -1,0 +1,10 @@
+.idea/
+__pycache__/
+build/
+dist/
+releases/
+m3u8/
+*.m3u8
+Data/
+Config.json
+ffmpeg.exe
