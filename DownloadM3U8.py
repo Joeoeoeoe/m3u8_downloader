@@ -4,7 +4,6 @@ import m3u8
 import os
 import shutil
 import requests
-from urllib3 import Retry
 
 from TimerTimer import TimerTimer
 from RandomHeaders import RandomHeaders

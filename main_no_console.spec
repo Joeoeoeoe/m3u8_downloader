@@ -6,7 +6,7 @@ a = Analysis(
     pathex=['./'],
     binaries=[],
     datas=[
-        (r"D:\Program Files\Python\Python39\Lib\site-packages\fake_useragent\data\browsers.jsonl"
+        (r"src\browsers.jsonl"
         ,"fake_useragent/data"),
         (r"src\downloader.ico","src")
     ],
@@ -30,8 +30,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=True,
-    upx=True,
-    console=True,
+    upx=True,    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

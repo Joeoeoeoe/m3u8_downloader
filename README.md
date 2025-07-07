@@ -76,11 +76,11 @@
 
 
 
-![1](https://github.com/Joeoeoeoe/m3u8_downloader/raw/main/screenshots/1.png)
+![1](./screenshots/1.png)
 
 
 
-![2](https://github.com/Joeoeoeoe/m3u8_downloader/raw/main/screenshots/2.png)
+![2](./screenshots/2.png)
 
 
 
@@ -99,19 +99,21 @@
 
    
 
-   ![3](https://github.com/Joeoeoeoe/m3u8_downloader/raw/main/screenshots/3.png)
+   ![3](./screenshots/3.png)
 
    
 
-   ![4](https://github.com/Joeoeoeoe/m3u8_downloader/raw/main/screenshots/4.png)
+   ![4](./screenshots/4.png)
 
 
 
 ## 安装与运行
 
-若需要进行手动编译，需要提前下载ffmpeg.exe并放到根目录下
+1. 若需要进行手动编译，需要提前下载ffmpeg.exe并放到根目录下
 
+2. 通过 `pyinstaller main_no_console.spec` 或者 `pyinstaller main_with_console.spec` 进行打包
 
+3. 注意 spec 文件中 a.datas 中需要囊括的内容
 
 ## 已知问题
 
@@ -126,3 +128,6 @@
 - **独立输出**：一次性多视频下载时，每次下载应当保存到独立子目录，避免日志或缓存覆盖
 - **缓存清理**：当此爬取完成后进行统一的过程文件的销毁，避免过度占用存储空间
 - **代理池**：通过模拟请求头，每次请求随机请求头，理论上难以被识别为爬虫软件；但是现在还无法避免封禁ip的反爬操作
+
+- 范围爬取  url中支持一个范围
+- 优化headers中的from-url

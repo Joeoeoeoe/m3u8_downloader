@@ -1,0 +1,1 @@
+- `browsers.jsonl` 来源于 `fake_useragent` 库，本机地址 `D:\Program Files\Python\Python39\Lib\site-packages\fake_useragent\data\browsers.jsonl`
