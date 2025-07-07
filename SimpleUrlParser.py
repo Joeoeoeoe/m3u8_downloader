@@ -105,66 +105,100 @@ class SimpleUrlParser:
 
         return generated_urls
 
+
+    def generate_urls_with_match_strings(self, url_template, replacements_data, placeholders_in_template):
+        """
+        根据 URL 模板、替换数据和占位符顺序生成最终 URL 列表，
+        同时为每个 URL 生成一个匹配字符串 (例如: idx_1_epi_2)。
+        返回一个 (url, match_string) 元组的列表。
+        """
+        generated_results = []
+        if not placeholders_in_template or not replacements_data:
+            # 如果没有需要替换的占位符，或没有提供替换规则
+            # match_string 为空
+            return [(url_template, "")]
+        # 确保按照占位符在模板中出现的顺序来取值列表
+        ordered_value_lists = []
+        for ph in placeholders_in_template:
+            if ph in replacements_data:
+                ordered_value_lists.append(replacements_data[ph])
+            else:
+                # 如果模板中有占位符但没有对应的规则，则忽略这个占位符的生成
+                # 这应该在 parse_input_string 中被警告
+                print(f"Error: Placeholder '{{{{{ph}}}}}' in template missing replacement data.")
+                return [] # 无法生成，返回空列表
+        # 生成所有组合
+        for combo in product(*ordered_value_lists):
+            current_url = url_template
+            match_parts = [] # 用于构建匹配字符串的部件列表
+            # 遍历占位符，按顺序替换
+            for i, ph_value in enumerate(combo):
+                placeholder_key = placeholders_in_template[i]
+                # 动态填充逻辑 (可选):
+                # 如果是数字，且是范围生成，可以根据最大值进行填充
+                ph_str_val = str(ph_value)
+                if isinstance(ph_value, int):
+                    # 查找这个 key 对应的所有值中最大的数字的位数，进行填充
+                    if placeholder_key in replacements_data and isinstance(replacements_data[placeholder_key][0], int):
+                        max_val_in_range = max(replacements_data[placeholder_key])
+                        padding_len = len(str(max_val_in_range))
+                        ph_str_val = str(ph_value).zfill(padding_len)
+                current_url = current_url.replace(f"{{{{{placeholder_key}}}}}", ph_str_val, 1) # 只替换一次，防止多重替换错误
+
+                # 为匹配字符串添加部件
+                match_parts.append(f"{placeholder_key}_{ph_str_val}")
+
+            # 构建最终的匹配字符串
+            match_string = "_".join(match_parts)
+            generated_results.append((current_url, match_string))
+        return generated_results
+
 # --- 使用示例 ---
 if __name__ == "__main__":
     parser = SimpleUrlParser()
-
-    # 示例 1: 数字范围
+    print("--- 示例 1: 数字范围 (带匹配字符串) ---")
     input_string_1 = "https://example.com/images/pic_{{idx}}.jpg {{idx:1-5}}"
     url_template_1, replacements_data_1, placeholders_1 = parser.parse_input_string(input_string_1)
     print(f"URL Template 1: {url_template_1}")
     print(f"Replacements Data 1: {replacements_data_1}")
     print(f"Placeholders 1: {placeholders_1}")
-    urls_1 = parser.generate_urls(url_template_1, replacements_data_1, placeholders_1)
-    print("Generated URLs 1:")
-    for url in urls_1:
-        print(url)
+    results_1 = parser.generate_urls_with_match_strings(url_template_1, replacements_data_1, placeholders_1)
+    print("Generated URLs & Match Strings 1:")
+    for url, match_str in results_1:
+        print(f"URL: {url}, Match: {match_str}")
     print("-" * 30)
-
-    # 示例 2: 列表
+    print("\n--- 示例 2: 列表 (带匹配字符串) ---")
     input_string_2 = "https://example.com/data_{{type}}.json {{type:users,products,orders}}"
     url_template_2, replacements_data_2, placeholders_2 = parser.parse_input_string(input_string_2)
     print(f"URL Template 2: {url_template_2}")
     print(f"Replacements Data 2: {replacements_data_2}")
     print(f"Placeholders 2: {placeholders_2}")
-    urls_2 = parser.generate_urls(url_template_2, replacements_data_2, placeholders_2)
-    print("Generated URLs 2:")
-    for url in urls_2:
-        print(url)
+    results_2 = parser.generate_urls_with_match_strings(url_template_2, replacements_data_2, placeholders_2)
+    print("Generated URLs & Match Strings 2:")
+    for url, match_str in results_2:
+        print(f"URL: {url}, Match: {match_str}")
     print("-" * 30)
-
-    # 示例 3: 多个占位符
+    print("\n--- 示例 3: 多个占位符 (带匹配字符串) ---")
     input_string_3 = "https://example.com/archive/{{year}}/month_{{month}}-page_{{page}}.zip {{year:2022-2023}} {{month:1,2}} {{page:1-3}}"
     url_template_3, replacements_data_3, placeholders_3 = parser.parse_input_string(input_string_3)
-    print(f"URL Template 3: {url_template_3}")
-    print(f"Replacements Data 3: {replacements_data_3}")
-    print(f"Placeholders 3: {placeholders_3}")
-    urls_3 = parser.generate_urls(url_template_3, replacements_data_3, placeholders_3)
-    print("Generated URLs 3:")
-    for url in urls_3:
-        print(url)
+    results_3 = parser.generate_urls_with_match_strings(url_template_3, replacements_data_3, placeholders_3)
+    print("Generated URLs & Match Strings 3:")
+    for url, match_str in results_3:
+        print(f"URL: {url}, Match: {match_str}")
     print("-" * 30)
-
-    # 示例 4: 没有替换规则的普通 URL
+    print("\n--- 示例 4: 没有替换规则的普通 URL (带匹配字符串) ---")
     input_string_4 = "https://example.com/single_file.txt"
     url_template_4, replacements_data_4, placeholders_4 = parser.parse_input_string(input_string_4)
-    print(f"URL Template 4: {url_template_4}")
-    print(f"Replacements Data 4: {replacements_data_4}")
-    print(f"Placeholders 4: {placeholders_4}")
-    urls_4 = parser.generate_urls(url_template_4, replacements_data_4, placeholders_4)
-    print("Generated URLs 4:")
-    for url in urls_4:
-        print(url)
+    results_4 = parser.generate_urls_with_match_strings(url_template_4, replacements_data_4, placeholders_4)
+    print("Generated URLs & Match Strings 4:")
+    for url, match_str in results_4:
+        print(f"URL: {url}, Match: {match_str}")
     print("-" * 30)
-
-    # 示例 5: URL 中有占位符，但规则文件中没有定义
+    print("\n--- 示例 5: URL 中有占位符，但规则文件中没有定义 (带匹配字符串) ---")
     input_string_5 = "https://example.com/file_{{undefined}}.pdf {{idx:1-2}}"
     url_template_5, replacements_data_5, placeholders_5 = parser.parse_input_string(input_string_5)
-    print(f"URL Template 5: {url_template_5}")
-    print(f"Replacements Data 5: {replacements_data_5}")
-    print(f"Placeholders 5: {placeholders_5}")
-    urls_5 = parser.generate_urls(url_template_5, replacements_data_5, placeholders_5)
-    print("Generated URLs 5:")
-    for url in urls_5:
-        print(url)
+    results_5 = parser.generate_urls_with_match_strings(url_template_5, replacements_data_5, placeholders_5)
+    print("Generated URLs & Match Strings 5:")
+    for url, match_str in results_5:
+        print(f"URL: {url}, Match: {match_str}")
     print("-" * 30)

@@ -93,10 +93,10 @@ class DownloadM3U8:
     def prepareDownload(self):
         self.printInfo('getting', 'index.m3u8', self.URL)
         try:
-            # playlist = m3u8.load(self.URL)
-            playlist = m3u8.loads(requests.get(self.URL, headers=RandomHeaders()[0]))
+            playlist = m3u8.load(self.URL, headers=RandomHeaders()[0])
+            # playlist = m3u8.loads(requests.get(self.URL, headers=RandomHeaders()[0]).text)
         except Exception as e:
-            print(f'm3u8 read error! {e}')
+            print(f'm3u8 read error! {e}\n\n')
             raise ValueError('m3u8 read error')
         self.printInfo('got', 'index.m3u8', self.URL)
         self.playlist = playlist

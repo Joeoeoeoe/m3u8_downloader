@@ -80,20 +80,20 @@ class Worker(QThread):
             print(f"URL Template: {url_template}")
             print(f"Replacements Data: {replacements_data}")
             print(f"Placeholders: {placeholders}")
-            urls = parser.generate_urls(url_template, replacements_data, placeholders)
+            urls_and_strings = parser.generate_urls_with_match_strings(url_template, replacements_data, placeholders)
             print("Generated URLs:")
-            for url in urls:
-                print(url)
+            for url, match_str in urls_and_strings:
+                print(f"URL: {url}, Match: {match_str}")
             print("-" * 30)
 
-            def run_url(URL):
+            def run_url(URL, this_filename):
                 if URL == '':
                     return
                 else:
                     print(f'\t\t\t********INPUT********')
                     print(f'\t\t****Url={URL}****')
                     print(f'\t\t****Folder={folder}****')
-                    print(f'\t\t****Filename={filename}****')
+                    print(f'\t\t****Filename={this_filename}****')
                     print(f'\t\t****FileExtention={fileExtText}****')
                     print(f'\t\t****?deep finding={deep}****')
                     if deep:
@@ -115,7 +115,7 @@ class Worker(QThread):
 
                     # 保存下载列表
                     d_Config = \
-                        {'URL': URL, 'folder': folder, 'filename':filename,
+                        {'URL': URL, 'folder': folder, 'filename':this_filename,
                          'fileExtText':fileExtText, 'deep':deep,
                          'depth':depth, 'downloadList':downloadList,
                          'downloadMode':downloadMode, 'downloadModeText':downloadModeText,
@@ -146,7 +146,7 @@ class Worker(QThread):
                                 raise e
 
                             x.DonwloadAndWrite()
-                            x.writeVideoBat(f'{filename}', fileExtText) if i == 0 else x.writeVideoBat(f'{filename}-{i}', fileExtText)
+                            x.writeVideoBat(f'{this_filename}', fileExtText) if i == 0 else x.writeVideoBat(f'{this_filename}-{i}', fileExtText)
                             print(f'\n********starting to generate {fileExtText}********')
                             os.system(os.path.join(folder, 'combine.bat'))
                             print(f'\n********{fileExtText} completed generating********\n\n')
@@ -156,8 +156,8 @@ class Worker(QThread):
                     if len(self.l) != 0:
                         DownloadJson(d).write()
 
-            for x in urls:
-                run_url(x)
+            for url, match_str in urls_and_strings:
+                run_url(url, f'{filename}_{match_str}')
 
         except Exception as e:
             print(f'Error in Worker! {e}')
