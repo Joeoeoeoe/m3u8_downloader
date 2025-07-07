@@ -59,6 +59,10 @@ class MonitorM3U8:
                 url = re.sub(r'[^\/\.\#]+\.m3u8', 'index.m3u8', url)
                 with self.lock:
                     self.predicted.add(url)
+            if 'mixed.m3u8' not in url:
+                url = re.sub(r'[^\/\.\#]+\.m3u8', 'mixed.m3u8', url)
+                with self.lock:
+                    self.predicted.add(url)
 
 
 

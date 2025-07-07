@@ -1,3 +1,5 @@
+# 定时执行某个函数func，可以设置定时重复执行
+
 import threading
 
 class TimerTimer:

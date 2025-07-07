@@ -13,10 +13,10 @@ from UI.ConfigWindow import Ui_ConfigWindow
 from JsonProcessor import ConfigJson, DownloadJson, ReadDownloadJson
 from MonitorM3U8 import MonitorM3U8
 from DownloadM3U8 import DownloadM3U8
+from SimpleUrlParser import SimpleUrlParser
 
 
-
-
+# 输出重定向
 class EmittingStream(QObject):
     textWritten = pyqtSignal(str)
     coverLine = pyqtSignal(str)
@@ -75,65 +75,92 @@ class Worker(QThread):
             listModeText = self.listModeText
 
             # 开始下载数据
-            if URL != '':
-                print(f'\t\t\t********INPUT********')
-                print(f'\t\t****Url={URL}****')
-                print(f'\t\t****Folder={folder}****')
-                print(f'\t\t****Filename={filename}****')
-                print(f'\t\t****FileExtention={fileExtText}****')
-                print(f'\t\t****?deep finding={deep}****')
-                if deep:
-                    print(f'\t\t    >> Depth = {depth}')
-                print(f'\t\t****?save download list={downloadList}')
-                print(f'\t\t****Download mode={downloadModeText}****')
-                if not self.monitor:
-                    print(f'\t\t****List mode={listModeText}****')
-                    sys.stdout.flush()  # 手动刷新缓冲区
-                else:
-                    if '.m3u8' in URL:
-                        # 给出m3u8的地址，直接开始下载
-                        print('\n\t**m3u8 address is provided; directly download**\n')
-                        self.l = [URL]
-                    else:
-                        # 监测网址获取下载地址
-                        l1,l2 = MonitorM3U8(URL, deep, depth).simple()
-                        self.l.extend(l1 + l2)
+            parser = SimpleUrlParser()
+            url_template, replacements_data, placeholders = parser.parse_input_string(URL)
+            print(f"URL Template: {url_template}")
+            print(f"Replacements Data: {replacements_data}")
+            print(f"Placeholders: {placeholders}")
+            urls = parser.generate_urls(url_template, replacements_data, placeholders)
+            print("Generated URLs:")
+            for url in urls:
+                print(url)
+            print("-" * 30)
 
-                # 保存下载列表
-                d_Config = \
-                    {'URL': URL, 'folder': folder, 'filename':filename,
-                     'fileExtText':fileExtText, 'deep':deep,
-                     'depth':depth, 'downloadList':downloadList,
-                     'downloadMode':downloadMode, 'downloadModeText':downloadModeText,
-                     'listMode':listMode, 'listModeText':listModeText}
-                d = {'Config':d_Config}
-                # 中断检查
-                if self._is_interrupted:
-                    print('Interrupted Success!')
+            def run_url(URL):
+                if URL == '':
                     return
-                # 开始遍历：
-                for i, iURL in enumerate(self.l):
+                else:
+                    print(f'\t\t\t********INPUT********')
+                    print(f'\t\t****Url={URL}****')
+                    print(f'\t\t****Folder={folder}****')
+                    print(f'\t\t****Filename={filename}****')
+                    print(f'\t\t****FileExtention={fileExtText}****')
+                    print(f'\t\t****?deep finding={deep}****')
+                    if deep:
+                        print(f'\t\t    >> Depth = {depth}')
+                    print(f'\t\t****?save download list={downloadList}')
+                    print(f'\t\t****Download mode={downloadModeText}****')
+                    if not self.monitor:
+                        print(f'\t\t****List mode={listModeText}****')
+                        sys.stdout.flush()  # 手动刷新缓冲区
+                    else:
+                        if '.m3u8' in URL:
+                            # 给出m3u8的地址，直接开始下载
+                            print('\n\t**m3u8 address is provided; directly download**\n')
+                            self.l = [URL]
+                        else:
+                            # 监测网址获取下载地址
+                            l1,l2 = MonitorM3U8(URL, deep, depth).simple()
+                            self.l.extend(l1 + l2)
+
+                    # 保存下载列表
+                    d_Config = \
+                        {'URL': URL, 'folder': folder, 'filename':filename,
+                         'fileExtText':fileExtText, 'deep':deep,
+                         'depth':depth, 'downloadList':downloadList,
+                         'downloadMode':downloadMode, 'downloadModeText':downloadModeText,
+                         'listMode':listMode, 'listModeText':listModeText}
+                    d = {'Config':d_Config}
                     # 中断检查
                     if self._is_interrupted:
                         print('Interrupted Success!')
                         return
-                    if downloadMode == 0 or (downloadMode == 1 and i > 0) or (downloadMode == 2 and i > 5):
-                        if downloadList:
-                            d[str(i)] = {'url': iURL, 'completed': False}
-                    else:
-                        x = DownloadM3U8(folder, iURL)
-                        x.DonwloadAndWrite()
-                        x.writeVideoBat(f'{filename}', fileExtText) if i == 0 else x.writeVideoBat(f'{filename}-{i}', fileExtText)
-                        print(f'\n********starting to generate {fileExtText}********')
-                        os.system(os.path.join(folder, 'combine.bat'))
-                        print(f'\n********{fileExtText} completed generating********\n\n')
-                        if downloadList:
-                            d[str(i)] = {'url': iURL, 'completed': True}
-                # 保存下载列表
-                if len(self.l) != 0:
-                    DownloadJson(d).write()
+                    # 开始遍历：
+                    for i, iURL in enumerate(self.l):
+                        # 中断检查
+                        if self._is_interrupted:
+                            print('Interrupted Success!')
+                            return
+                        if downloadMode == 0 or (downloadMode == 1 and i > 0) or (downloadMode == 2 and i > 5):
+                            if downloadList:
+                                d[str(i)] = {'url': iURL, 'completed': False}
+                        else:
+                            try:
+                                x = DownloadM3U8(folder, iURL)
+                            except ValueError as e:
+                                if 'm3u8 read error' in str(e):
+                                    break
+                                else:
+                                    raise e
+                            except Exception as e:
+                                raise e
+
+                            x.DonwloadAndWrite()
+                            x.writeVideoBat(f'{filename}', fileExtText) if i == 0 else x.writeVideoBat(f'{filename}-{i}', fileExtText)
+                            print(f'\n********starting to generate {fileExtText}********')
+                            os.system(os.path.join(folder, 'combine.bat'))
+                            print(f'\n********{fileExtText} completed generating********\n\n')
+                            if downloadList:
+                                d[str(i)] = {'url': iURL, 'completed': True}
+                    # 保存下载列表
+                    if len(self.l) != 0:
+                        DownloadJson(d).write()
+
+            for x in urls:
+                run_url(x)
+
         except Exception as e:
-            print(e)
+            print(f'Error in Worker! {e}')
 
     def interrupt(self):
         """用于外部请求中断该线程"""
@@ -395,9 +422,9 @@ class MyWindow(QMainWindow):
 
 
 
-if __name__ == "__main__":
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)  # 启用高 DPI 缩放
-    app = QApplication(sys.argv)
-    mainWindow = MyWindow() # 会重定向输出到textBrowser中
-    mainWindow.show()
-    sys.exit(app.exec_())
+# if __name__ == "__main__":
+#     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)  # 启用高 DPI 缩放
+#     app = QApplication(sys.argv)
+#     mainWindow = MyWindow() # 会重定向输出到textBrowser中
+#     mainWindow.show()
+#     sys.exit(app.exec_())

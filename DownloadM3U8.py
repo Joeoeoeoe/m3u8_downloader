@@ -92,8 +92,12 @@ class DownloadM3U8:
 
     def prepareDownload(self):
         self.printInfo('getting', 'index.m3u8', self.URL)
-        # playlist = m3u8.load(self.URL)
-        playlist = m3u8.loads(requests.get(self.URL, headers=RandomHeaders()[0]))
+        try:
+            # playlist = m3u8.load(self.URL)
+            playlist = m3u8.loads(requests.get(self.URL, headers=RandomHeaders()[0]))
+        except Exception as e:
+            print(f'm3u8 read error! {e}')
+            raise ValueError('m3u8 read error')
         self.printInfo('got', 'index.m3u8', self.URL)
         self.playlist = playlist
 
@@ -165,6 +169,7 @@ class DownloadM3U8:
                 break
 
     def WriteM3U8(self):
+        # 将m3u8索引文件写入本地
         self.playlist.segments[:] = [seg for seg in self.playlist.segments if seg.uri not in self.failedNameList]
         with open(os.path.join(self.tempDir, 'index.m3u8'), "w", encoding="utf-8") as f:
             f.write(self.playlist.dumps())  # 使用 playlist.dumps() 获取 m3u8 的内容并写入文件
