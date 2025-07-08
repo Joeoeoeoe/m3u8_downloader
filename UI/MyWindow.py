@@ -139,25 +139,33 @@ class Worker(QThread):
                                 x = DownloadM3U8(folder, iURL)
                             except ValueError as e:
                                 if 'm3u8 read error' in str(e):
-                                    break
+                                    continue # 继续剩余识别到的m3u8的下载
                                 else:
                                     raise e
                             except Exception as e:
                                 raise e
 
                             x.DonwloadAndWrite()
-                            x.writeVideoBat(f'{this_filename}', fileExtText) if i == 0 else x.writeVideoBat(f'{this_filename}-{i}', fileExtText)
+
+                            # 通过bat的调用逻辑
+                            # x.writeVideoBat(f'{this_filename}', fileExtText) if i == 0 else x.writeVideoBat(f'{this_filename}-{i}', fileExtText)
+                            # print(f'\n********starting to generate {fileExtText}********')
+                            # os.system(os.path.join(folder, 'combine.bat'))
+                            # print(f'\n********{fileExtText} completed generating********\n\n')
+
+                            # 程序中调用ffmpeg.exe的逻辑（非dll接口）
                             print(f'\n********starting to generate {fileExtText}********')
-                            os.system(os.path.join(folder, 'combine.bat'))
+                            x.process_video_with_ffmpeg(this_filename, fileExtText)
                             print(f'\n********{fileExtText} completed generating********\n\n')
+
                             if downloadList:
                                 d[str(i)] = {'url': iURL, 'completed': True}
                     # 保存下载列表
                     if len(self.l) != 0:
                         DownloadJson(d).write()
 
-            for url, match_str in urls_and_strings:
-                run_url(url, f'{filename}_{match_str}')
+            for url, match_str in urls_and_strings: # 地址范围中的每个url 不是一个url中识别到的所有m3u8视频
+                run_url(url, f'{filename}_{match_str}' if match_str!='' else filename)
 
         except Exception as e:
             print(f'Error in Worker! {e}')

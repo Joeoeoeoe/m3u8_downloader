@@ -1,3 +1,4 @@
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 import time
 import m3u8
@@ -91,7 +92,7 @@ class DownloadM3U8:
 
 
     def prepareDownload(self):
-        self.printInfo('getting', 'index.m3u8', self.URL)
+        self.printInfo('getting', '*.m3u8', self.URL)
         try:
             playlist = m3u8.load(self.URL, headers=RandomHeaders()[0])
             # playlist = m3u8.loads(requests.get(self.URL, headers=RandomHeaders()[0]).text)
@@ -220,3 +221,57 @@ class DownloadM3U8:
         if os.path.exists(filePath):
             newPath = os.path.join(self.fileDir, f'origin-{fileName}{extension}')
             os.rename(filePath,newPath)
+
+
+    def process_video_with_ffmpeg(self, base_filename: str, extension: str = '.mp4') -> bool:
+        self._ffmpeg_exe_path = os.path.join(os.getcwd(), 'ffmpeg.exe')
+        if self._ffmpeg_exe_path is None:
+            return False
+        index_m3u8_path = os.path.join(self.tempDir, 'index.m3u8')
+
+        # 构建最终输出文件的完整路径
+        proposed_output_filename = f'{base_filename}{extension}'
+        final_output_path = os.path.join(self.fileDir, proposed_output_filename)
+        # 处理同名文件逻辑：如果文件已存在，则在文件名后添加 (N)
+        counter = 0
+        while os.path.exists(final_output_path):
+            counter += 1
+            proposed_output_filename = f'{base_filename}({counter}){extension}'
+            final_output_path = os.path.join(self.fileDir, proposed_output_filename)
+
+        if not os.path.exists(index_m3u8_path):
+            print(f"Error: Input M3U8 file not found: '{index_m3u8_path}'")
+            return False
+        command = [
+            self._ffmpeg_exe_path,
+            "-allowed_extensions", "ALL",
+            "-i", index_m3u8_path,
+            "-c", "copy",
+            final_output_path # 使用处理后的最终输出路径
+        ]
+        print(f'\n\t********generating {extension} for {base_filename}{extension} to {os.path.basename(final_output_path)}********')
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            # print("--- FFmpeg STDOUT ---")
+            # print(result.stdout)
+            # print("\n--- FFmpeg STDERR ---")
+            # print(result.stderr)
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"\nError: FFmpeg command failed for {base_filename}. Return code: {e.returncode}")
+            print("\n--- FFmpeg STDOUT (Error Context) ---")
+            print(e.stdout)
+            print("\n--- FFmpeg STDERR (Error Details) ---")
+            print(e.stderr)
+            return False
+        except FileNotFoundError:
+            print(f"\nError: FFmpeg executable not found at '{self._ffmpeg_exe_path}'.")
+            return False
+        except Exception as e:
+            print(f"\nAn unexpected error occurred during processing {base_filename}: {e}")
+            return False
