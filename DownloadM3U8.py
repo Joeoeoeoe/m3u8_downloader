@@ -94,7 +94,20 @@ class DownloadM3U8:
     def prepareDownload(self):
         self.printInfo('getting', '*.m3u8', self.URL)
         try:
-            playlist = m3u8.load(self.URL, headers=RandomHeaders()[0])
+            headers = {
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+                "referer": "https://8.jxx5396d.cc:8888/",
+                "origin": "https://8.jxx5396d.cc:8888",
+                "accept": "*/*",
+                "accept-encoding": "gzip, deflate, br, zstd",
+                "accept-language": "zh,zh-CN;q=0.9",
+                "cache-control": "no-cache",
+                "pragma": "no-cache",
+                # "host": "res.wtycms.com",  # host 一般不用手动加
+                # 其他 sec- 开头的头部可以不用加
+            }
+            playlist = m3u8.load(self.URL, headers=headers)
+            # playlist = m3u8.load(self.URL, headers=RandomHeaders()[0])
             # playlist = m3u8.loads(requests.get(self.URL, headers=RandomHeaders()[0]).text)
         except Exception as e:
             print(f'm3u8 read error! {e}\n\n')
