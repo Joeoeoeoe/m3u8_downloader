@@ -275,10 +275,9 @@ class DownloadM3U8:
         ]
         print(f'\n\t********generating {extension} for {base_filename}{extension} to {os.path.basename(final_output_path)}********')
         try:
-            result = subprocess.run(
+            subprocess.run(
                 command,
                 capture_output=True,
-                text=True,
                 check=True
             )
             # print("--- FFmpeg STDOUT ---")
@@ -289,9 +288,9 @@ class DownloadM3U8:
         except subprocess.CalledProcessError as e:
             print(f"\nError: FFmpeg command failed for {base_filename}. Return code: {e.returncode}")
             print("\n--- FFmpeg STDOUT (Error Context) ---")
-            print(e.stdout)
+            print(self._safe_decode(e.stdout))
             print("\n--- FFmpeg STDERR (Error Details) ---")
-            print(e.stderr)
+            print(self._safe_decode(e.stderr))
             return False
         except FileNotFoundError:
             print(f"\nError: FFmpeg executable not found at '{self._ffmpeg_exe_path}'.")
@@ -299,3 +298,16 @@ class DownloadM3U8:
         except Exception as e:
             print(f"\nAn unexpected error occurred during processing {base_filename}: {e}")
             return False
+
+    @staticmethod
+    def _safe_decode(raw_output):
+        if raw_output is None:
+            return ""
+        if isinstance(raw_output, str):
+            return raw_output
+        for enc in ("utf-8", "gbk", "cp1252"):
+            try:
+                return raw_output.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return raw_output.decode("utf-8", errors="replace")
