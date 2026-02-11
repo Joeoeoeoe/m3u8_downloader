@@ -5,6 +5,7 @@ import m3u8
 import os
 import shutil
 import requests
+from urllib.parse import urlparse
 
 from TimerTimer import TimerTimer
 from RandomHeaders import RandomHeaders
@@ -18,6 +19,9 @@ class DownloadM3U8:
 
         # 下载列表
         self.URL = URL.strip()
+        parsed = urlparse(self.URL)
+        self.origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        print("parsed:", parsed, "; ", "self.origin:", self.origin)
         self.playlist = None  # 存m3u8.load()返回的playlist
         # 两个列表，实现文件名和请求地址的一一对应
         self.fileNameList = []
@@ -96,8 +100,8 @@ class DownloadM3U8:
         try:
             headers = {
                 "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
-                "referer": "https://8.jxx5396d.cc:8888/",
-                "origin": "https://8.jxx5396d.cc:8888",
+                "referer": f"{self.origin}/" if self.origin else self.URL,
+                "origin": self.origin if self.origin else None,
                 "accept": "*/*",
                 "accept-encoding": "gzip, deflate, br, zstd",
                 "accept-language": "zh,zh-CN;q=0.9",
@@ -106,6 +110,8 @@ class DownloadM3U8:
                 # "host": "res.wtycms.com",  # host 一般不用手动加
                 # 其他 sec- 开头的头部可以不用加
             }
+            # 去掉 None 值，避免无效头部
+            headers = {k: v for k, v in headers.items() if v}
             playlist = m3u8.load(self.URL, headers=headers)
             # playlist = m3u8.load(self.URL, headers=RandomHeaders()[0])
             # playlist = m3u8.loads(requests.get(self.URL, headers=RandomHeaders()[0]).text)
@@ -133,6 +139,11 @@ class DownloadM3U8:
         try:
             # 独立创建 session，确保线程安全
             with requests.Session() as session:
+                # 兼容防盗链：优先站点 referer/origin，再叠加随机头
+                if self.origin:
+                    session.headers.update({"referer": f"{self.origin}/", "origin": self.origin})
+                else:
+                    session.headers.update({"referer": self.URL})
                 session.headers.update(RandomHeaders()[0])  # 更新请求头
                 response = session.get(fileUrl, timeout=(self.timeout, self.timeout))
                 response.raise_for_status()  # 检查请求状态码，非 2xx 会抛出异常

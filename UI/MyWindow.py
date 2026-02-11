@@ -51,7 +51,7 @@ class Worker(QThread):
 
         self.monitor = monitor # 是否进行监测（是否使用加载的列表）
         self._is_interrupted = False  # 退出标志
-        self.l = [] # 总的下载列表
+        self.l = [] # 加载下载列表时使用
 
         if not self.monitor:
             self.downloadMode = 3  # 更新downloadMode为下载所有
@@ -87,6 +87,7 @@ class Worker(QThread):
             print("-" * 30)
 
             def run_url(URL, this_filename):
+                current_urls = []
                 if URL == '':
                     return
                 else:
@@ -103,15 +104,19 @@ class Worker(QThread):
                     if not self.monitor:
                         print(f'\t\t****List mode={listModeText}****')
                         sys.stdout.flush()  # 手动刷新缓冲区
+                        current_urls = list(self.l)
                     else:
                         if '.m3u8' in URL:
                             # 给出m3u8的地址，直接开始下载
                             print('\n\t**m3u8 address is provided; directly download**\n')
-                            self.l = [URL]
+                            current_urls = [URL]
                         else:
                             # 监测网址获取下载地址
                             l1,l2 = MonitorM3U8(URL, deep, depth).simple()
-                            self.l.extend(l1 + l2)
+                            current_urls = l1 + l2
+
+                    # 去重并保持顺序，避免重复下载
+                    current_urls = list(dict.fromkeys(current_urls))
 
                     # 保存下载列表
                     d_Config = \
@@ -126,12 +131,12 @@ class Worker(QThread):
                         print('Interrupted Success!')
                         return
                     # 开始遍历：
-                    for i, iURL in enumerate(self.l):
+                    for i, iURL in enumerate(current_urls):
                         # 中断检查
                         if self._is_interrupted:
                             print('Interrupted Success!')
                             return
-                        if downloadMode == 0 or (downloadMode == 1 and i > 0) or (downloadMode == 2 and i > 5):
+                        if downloadMode == 0 or (downloadMode == 1 and i > 0) or (downloadMode == 2 and i >= 5):
                             if downloadList:
                                 d[str(i)] = {'url': iURL, 'completed': False}
                         else:
@@ -161,7 +166,7 @@ class Worker(QThread):
                             if downloadList:
                                 d[str(i)] = {'url': iURL, 'completed': True}
                     # 保存下载列表
-                    if len(self.l) != 0:
+                    if len(current_urls) != 0:
                         DownloadJson(d).write()
 
             for url, match_str in urls_and_strings: # 地址范围中的每个url 不是一个url中识别到的所有m3u8视频

@@ -67,8 +67,8 @@ class MonitorM3U8:
 
 
     def MonitorUrl(self):
-        def __monitorSingle():
-            browser = sync_playwright().start().chromium.launch(
+        def __monitorSingle(playwright_driver):
+            browser = playwright_driver.chromium.launch(
                 headless=True,
                 # 启用共享上下文减少资源消耗
                 channel="chrome",
@@ -96,12 +96,17 @@ class MonitorM3U8:
 
             # 关闭
             context.close()
+            browser.close()
 
         print(f'\n\t****monitor started****\nURL={self.URL}')
 
         tries = 3 if self.depth in [0,2] else 5
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            [executor.submit(__monitorSingle) for _ in range(tries)]
+        with sync_playwright() as p:
+            for _ in range(tries):
+                try:
+                    __monitorSingle(p)
+                except Exception:
+                    continue
 
         print('\n\n\t****monitor done****')
 
