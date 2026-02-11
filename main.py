@@ -1,12 +1,3 @@
-# import requests
-# import re
-# import os
-#
-# from RandomHeaders import RandomHeaders
-# from DownloadM3U8 import DownloadM3U8
-# from XmlEncoderDecoder import XmlEncoderDecoder
-# from MonitorM3U8 import MonitorM3U8
-
 import sys
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog
