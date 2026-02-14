@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, urlparse
@@ -13,7 +14,7 @@ from RandomHeaders import RandomHeaders
 
 
 class DownloadM3U8:
-    def __init__(self, folder, URL, threadNum=100, proxy_config=None):
+    def __init__(self, folder, URL, threadNum=100, proxy_config=None, session_hints=None):
         # 文件夹
         self.fileDir = folder
         self.tempDir = os.path.join(self.fileDir, ".TEMP")
@@ -51,6 +52,13 @@ class DownloadM3U8:
             self.threadNum = max(1, int(threadNum))
         except (TypeError, ValueError):
             self.threadNum = 100
+        self.round_threads = self.threadNum
+        self.state_lock = threading.Lock()
+        self.blocking_failures = 0
+        self.session_hints = self._normalize_session_hints(session_hints)
+        self.identity_pool = self._build_identity_pool(pool_size=3)
+        self.active_identity_index = 0
+        print(f"identity pool size={len(self.identity_pool)}")
 
         self.prepareDownload()  # 对index.m3u8初步解析，填充上面两个列表，不做任何下载
 
@@ -89,6 +97,154 @@ class DownloadM3U8:
 
         return f"http://{auth}{proxy_config['address']}:{proxy_config['port']}"
 
+    @staticmethod
+    def _default_user_agent():
+        return (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/139.0.0.0 Safari/537.36"
+        )
+
+    @staticmethod
+    def _normalize_session_hints(session_hints):
+        data = session_hints if isinstance(session_hints, dict) else {}
+        cookies = []
+        for item in data.get("cookies", []):
+            if isinstance(item, dict) and item.get("name", "") != "":
+                cookies.append(item)
+
+        referer_map = {}
+        raw_map = data.get("referer_map", {})
+        if isinstance(raw_map, dict):
+            for key, value in raw_map.items():
+                k = str(key).strip()
+                v = str(value).strip()
+                if k != "" and v != "":
+                    referer_map[k] = v
+
+        return {
+            "source_url": str(data.get("source_url", "")).strip(),
+            "final_url": str(data.get("final_url", "")).strip(),
+            "user_agent": str(data.get("user_agent", "")).strip(),
+            "cookies": cookies,
+            "referer_map": referer_map,
+        }
+
+    def _resolve_referer_for(self, target_url):
+        referer_map = self.session_hints.get("referer_map", {})
+        if target_url in referer_map and referer_map[target_url] != "":
+            return referer_map[target_url]
+        if self.URL in referer_map and referer_map[self.URL] != "":
+            return referer_map[self.URL]
+
+        final_url = self.session_hints.get("final_url", "")
+        if final_url != "":
+            return final_url
+
+        source_url = self.session_hints.get("source_url", "")
+        if source_url != "":
+            return source_url
+
+        if self.origin != "":
+            return f"{self.origin}/"
+        return self.URL
+
+    def _sanitize_download_headers(self, raw_headers, referer, origin="", preferred_user_agent=""):
+        raw = raw_headers if isinstance(raw_headers, dict) else {}
+        ua = preferred_user_agent or raw.get("user-agent", "") or self._default_user_agent()
+        headers = {
+            "user-agent": ua,
+            "accept": "*/*",
+            "accept-language": raw.get("accept-language", "zh,zh-CN;q=0.9,en;q=0.8"),
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+            "connection": "keep-alive",
+            "referer": referer,
+            "origin": origin if origin else None,
+        }
+        return {k: v for k, v in headers.items() if v}
+
+    def _build_identity_pool(self, pool_size=3):
+        size = max(1, int(pool_size))
+        referer = self._resolve_referer_for(self.URL)
+        referer_candidates = [referer]
+        source_url = self.session_hints.get("source_url", "")
+        if source_url != "" and source_url not in referer_candidates:
+            referer_candidates.append(source_url)
+
+        generated = RandomHeaders.GenHeadersList(size, referer_candidates)
+        pool = []
+        for index, headers in enumerate(generated):
+            preferred_ua = ""
+            if index == 0:
+                preferred_ua = self.session_hints.get("user_agent", "")
+            pool.append(
+                self._sanitize_download_headers(
+                    headers,
+                    referer=referer,
+                    origin=self.origin,
+                    preferred_user_agent=preferred_ua,
+                )
+            )
+
+        if len(pool) == 0:
+            pool.append(
+                self._sanitize_download_headers(
+                    {},
+                    referer=referer,
+                    origin=self.origin,
+                    preferred_user_agent=self.session_hints.get("user_agent", "") or self._default_user_agent(),
+                )
+            )
+
+        unique_pool = []
+        seen = set()
+        for headers in pool:
+            key = (headers.get("user-agent", ""), headers.get("referer", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_pool.append(headers)
+        return unique_pool if unique_pool else pool[:1]
+
+    def _set_active_identity(self, index):
+        if len(self.identity_pool) == 0:
+            self.active_identity_index = 0
+            return
+        self.active_identity_index = max(0, int(index)) % len(self.identity_pool)
+
+    def _active_identity_headers(self):
+        if len(self.identity_pool) == 0:
+            return self._sanitize_download_headers({}, referer=self._resolve_referer_for(self.URL), origin=self.origin)
+        return dict(self.identity_pool[self.active_identity_index])
+
+    def _build_request_headers(self, target_url, for_playlist=False):
+        headers = self._active_identity_headers()
+        headers["referer"] = self._resolve_referer_for(target_url)
+        if self.origin != "":
+            headers["origin"] = self.origin
+        if for_playlist:
+            headers["accept"] = "*/*"
+        return {k: v for k, v in headers.items() if v}
+
+    def _apply_session_cookies(self, session):
+        for cookie in self.session_hints.get("cookies", []):
+            try:
+                name = cookie.get("name", "")
+                value = cookie.get("value", "")
+                if name == "":
+                    continue
+                kwargs = {}
+                domain = cookie.get("domain", "")
+                path = cookie.get("path", "")
+                if domain != "":
+                    kwargs["domain"] = domain
+                if path != "":
+                    kwargs["path"] = path
+                session.cookies.set(name, value, **kwargs)
+            except Exception:
+                continue
+
     def _new_session(self, headers=None):
         session = requests.Session()
         # 避免被系统代理环境变量接管
@@ -104,6 +260,7 @@ class DownloadM3U8:
 
         if headers:
             session.headers.update(headers)
+        self._apply_session_cookies(session)
         return session
 
     @staticmethod
@@ -157,17 +314,7 @@ class DownloadM3U8:
     def prepareDownload(self):
         self.printInfo("getting", "*.m3u8", self.URL)
         try:
-            headers = {
-                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
-                "referer": f"{self.origin}/" if self.origin else self.URL,
-                "origin": self.origin if self.origin else None,
-                "accept": "*/*",
-                "accept-encoding": "gzip, deflate, br, zstd",
-                "accept-language": "zh,zh-CN;q=0.9",
-                "cache-control": "no-cache",
-                "pragma": "no-cache",
-            }
-            headers = {k: v for k, v in headers.items() if v}
+            headers = self._build_request_headers(self.URL, for_playlist=True)
             with self._new_session(headers=headers) as session:
                 response = session.get(self.URL, timeout=(self.timeout, self.timeout))
                 response.raise_for_status()
@@ -175,6 +322,24 @@ class DownloadM3U8:
                     playlist = m3u8.loads(response.text, uri=self.URL)
                 except TypeError:
                     playlist = m3u8.loads(response.text)
+
+                # 主播放列表场景：自动跟进到首个子播放列表，避免 total=0
+                if len(playlist.segments) == 0 and len(playlist.playlists) > 0:
+                    variant = playlist.playlists[0]
+                    variant_url = getattr(variant, "absolute_uri", "") or ""
+                    if variant_url == "" and getattr(variant, "uri", ""):
+                        variant_url = variant.uri
+                    if variant_url != "":
+                        headers = self._build_request_headers(variant_url, for_playlist=True)
+                        variant_resp = session.get(variant_url, timeout=(self.timeout, self.timeout), headers=headers)
+                        variant_resp.raise_for_status()
+                        try:
+                            playlist = m3u8.loads(variant_resp.text, uri=variant_url)
+                        except TypeError:
+                            playlist = m3u8.loads(variant_resp.text)
+
+                if len(playlist.segments) == 0:
+                    raise ValueError("empty m3u8 playlist")
         except Exception as e:
             print(f"m3u8 read error! {e}\n\n")
             raise ValueError("m3u8 read error")
@@ -197,12 +362,7 @@ class DownloadM3U8:
 
     def __downloadSingle(self, fileName, fileUrl):
         try:
-            headers = RandomHeaders()[0]
-            if self.origin:
-                headers.update({"referer": f"{self.origin}/", "origin": self.origin})
-            else:
-                headers.update({"referer": self.URL})
-            headers = {k: v for k, v in headers.items() if v}
+            headers = self._build_request_headers(fileUrl)
 
             with self._new_session(headers=headers) as session:
                 response = session.get(fileUrl, timeout=(self.timeout, self.timeout))
@@ -213,16 +373,22 @@ class DownloadM3U8:
                     file.write(response.content)
 
                 # 打印
-                self.connections = self.connections + 1
+                with self.state_lock:
+                    self.connections = self.connections + 1
                 self.printInfo("completed", fileName, fileUrl, response.elapsed.total_seconds())
 
         except requests.RequestException as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
             # 捕获网络请求异常并记录
-            self.failedNameList.append(fileName)
-            self.failedUrlList.append(fileUrl)
+            with self.state_lock:
+                self.failedNameList.append(fileName)
+                self.failedUrlList.append(fileUrl)
+                self.connections = self.connections + 1
+                if status_code in [401, 403, 429]:
+                    self.blocking_failures = self.blocking_failures + 1
             # 打印
-            self.connections = self.connections + 1
-            self.printInfo(f"failed: {e}", fileName, fileUrl)
+            stage = f"failed[{status_code}]: {e}" if status_code is not None else f"failed: {e}"
+            self.printInfo(stage, fileName, fileUrl)
 
     def RetryFailed(self, retries=10):
         # 失败列表最多重试10次
@@ -233,17 +399,33 @@ class DownloadM3U8:
         for attempt in range(retries):
             if len(self.failedNameList) == 0:
                 break
-            print(f"\n\t********attempt: {attempt + 1}/{retries} failed={len(self.failedNameList)}********")
+            self._set_active_identity(attempt + 1)
+            print(
+                f"\n\t********attempt: {attempt + 1}/{retries} failed={len(self.failedNameList)} "
+                f"identity={self.active_identity_index + 1}/{len(self.identity_pool)} "
+                f"threads={self.round_threads}********"
+            )
             # 临时存储本次重试开始前的状况
             failedNameList = self.failedNameList.copy()
             failedUrlList = self.failedUrlList.copy()
             self.failedNameList.clear()
             self.failedUrlList.clear()
+            with self.state_lock:
+                self.blocking_failures = 0
             if failed_time > 2:
                 self.timeout = self.timeout + 3
-            with ThreadPoolExecutor(max_workers=self.threadNum) as executor:
+            with ThreadPoolExecutor(max_workers=self.round_threads) as executor:
                 for name, url in zip(failedNameList, failedUrlList):
                     executor.submit(self.__downloadSingle, name, url)
+            with self.state_lock:
+                blocking_failures = self.blocking_failures
+            if blocking_failures > 0 and self.round_threads > 8:
+                old_threads = self.round_threads
+                self.round_threads = max(8, int(self.round_threads * 0.7))
+                print(
+                    f"\tblocking-like failures={blocking_failures}, "
+                    f"reduce threads {old_threads} -> {self.round_threads}"
+                )
             if len(self.failedNameList) == len(failedNameList):
                 failed_time = failed_time + 1
             elif len(self.failedNameList) >= len(failedNameList):
@@ -262,10 +444,12 @@ class DownloadM3U8:
     def DonwloadAndWrite(self, retries=10):
         # 启动定时器
         self.timeoutTimer.StartTimer()
+        self.round_threads = self.threadNum
+        self._set_active_identity(0)
 
         # 下载和写List中的文件
         print(f"\n\t********total={len(self.fileNameList)}********")
-        with ThreadPoolExecutor(max_workers=self.threadNum) as executor:
+        with ThreadPoolExecutor(max_workers=self.round_threads) as executor:
             for name, url in zip(self.fileNameList, self.fileUrlList):
                 executor.submit(self.__downloadSingle, name, url)
 
@@ -279,14 +463,19 @@ class DownloadM3U8:
         self.WriteM3U8()
 
     def TimeoutAdapting(self):
-        if self.connections < 15:
+        with self.state_lock:
+            connections = self.connections
+            failed_count = len(self.failedNameList)
+
+        if connections < 15:
             return
         if self.timeout >= self.maxTimeout:
             print("\t********bad connection********")
             return
-        if len(self.failedNameList) / self.connections > self.threshold:
+        failed_ratio = failed_count / connections
+        if failed_ratio > self.threshold:
             print(
-                f"\t********failed% = {len(self.failedNameList) / self.connections} = {len(self.failedNameList)}/{self.connections} > {self.threshold}"
+                f"\t********failed% = {failed_ratio} = {failed_count}/{connections} > {self.threshold}"
             )
             print(f"\t********changing timeout from {self.timeout} to {self.timeout + 3}********")
             self.timeout = self.timeout + 3

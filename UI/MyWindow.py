@@ -5,7 +5,7 @@ import sys
 # ui
 from PyQt5.QtCore import Qt, QObject, pyqtSignal, QThread, QProcess
 from PyQt5.QtGui import QTextCursor, QIcon
-from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, QLineEdit
+from PyQt5.QtWidgets import QApplication, QFileDialog, QLineEdit, QMainWindow
 
 from UI.MainWindow import Ui_MainWindow
 from UI.ConfigTabWindow import Ui_ConfigWindow
@@ -45,6 +45,7 @@ def default_config():
         "proxyUser": "",
         "proxyPassword": "",
         "maxParallel": 100,
+        "monitorHeadless": True,
     }
 
 
@@ -117,6 +118,7 @@ def normalize_config_dict(data):
     max_parallel = _to_int(merged.get("maxParallel"), defaults["maxParallel"], 1, 999)
     deep_enabled = _to_bool(merged.get("deep"), defaults["deep"])
     depth = _to_int(merged.get("depth"), defaults["depth"], 1, 3)
+    monitor_headless = _to_bool(merged.get("monitorHeadless"), defaults["monitorHeadless"])
 
     folder = _to_text(merged.get("folder"), defaults["folder"]) or defaults["folder"]
     filename = _to_text(merged.get("filename"), defaults["filename"]) or defaults["filename"]
@@ -148,6 +150,7 @@ def normalize_config_dict(data):
         "proxyUser": proxy["username"],
         "proxyPassword": proxy["password"],
         "maxParallel": max_parallel,
+        "monitorHeadless": monitor_headless,
     }
     if "URL" in incoming:
         normalized["URL"] = _to_text(incoming.get("URL"), "")
@@ -216,6 +219,9 @@ class Worker(QThread):
                     "proxyPassword": config["proxyConfig"].get("password", ""),
                 }
             )
+        self.monitorConfig = {
+            "headless": _to_bool(config.get("monitorHeadless", True), True),
+        }
 
         self.monitor = monitor  # 是否进行监测（是否使用加载的列表）
         self._is_interrupted = False  # 退出标志
@@ -239,6 +245,7 @@ class Worker(QThread):
             list_mode_text = self.listModeText
             max_parallel = self.maxParallel
             proxy_config = self.proxyConfig
+            monitor_config = dict(self.monitorConfig)
 
             # 开始下载数据
             if url_input == "":
@@ -257,6 +264,7 @@ class Worker(QThread):
 
             def run_url(url, this_filename):
                 current_urls = []
+                monitor_session_hints = {}
                 if url == "" and self.monitor:
                     return
 
@@ -272,6 +280,7 @@ class Worker(QThread):
                 print(f"\t\t****Download mode={download_mode_text}****")
                 print(f"\t\t****Max parallel={max_parallel}****")
                 print(f"\t\t****Proxy={'ON' if proxy_config['enabled'] else 'OFF'}****")
+                print(f"\t\t****Monitor headless={monitor_config['headless']}****")
                 if proxy_config["enabled"]:
                     print(
                         f"\t\t    >> {proxy_config['address']}:{proxy_config['port']} "
@@ -287,9 +296,24 @@ class Worker(QThread):
                         # 给出m3u8的地址，直接开始下载
                         print("\n\t**m3u8 address is provided; directly download**\n")
                         current_urls = [url]
+                        monitor_session_hints = {
+                            "source_url": url,
+                            "final_url": url,
+                            "user_agent": "",
+                            "cookies": [],
+                            "referer_map": {url: url},
+                        }
                     else:
                         # 监测网址获取下载地址
-                        l1, l2 = MonitorM3U8(url, deep, depth, proxy_config).simple()
+                        monitor = MonitorM3U8(
+                            url,
+                            deep,
+                            depth,
+                            proxy_config,
+                            monitor_config=monitor_config,
+                        )
+                        l1, l2 = monitor.simple()
+                        monitor_session_hints = monitor.get_session_hints()
                         current_urls = l1 + l2
 
                 # 去重并保持顺序，避免重复下载
@@ -314,6 +338,7 @@ class Worker(QThread):
                     "proxyUser": proxy_config["username"],
                     "proxyPassword": proxy_config["password"],
                     "maxParallel": max_parallel,
+                    "monitorHeadless": monitor_config["headless"],
                 }
                 d = {"Config": d_config}
 
@@ -333,7 +358,13 @@ class Worker(QThread):
                             d[str(i)] = {"url": i_url, "completed": False}
                     else:
                         try:
-                            x = DownloadM3U8(folder, i_url, threadNum=max_parallel, proxy_config=proxy_config)
+                            x = DownloadM3U8(
+                                folder,
+                                i_url,
+                                threadNum=max_parallel,
+                                proxy_config=proxy_config,
+                                session_hints=monitor_session_hints,
+                            )
                         except ValueError as e:
                             if "m3u8 read error" in str(e):
                                 continue  # 继续剩余识别到的m3u8的下载
@@ -342,9 +373,13 @@ class Worker(QThread):
                         x.DonwloadAndWrite()
 
                         # 程序中调用ffmpeg.exe的逻辑（非dll接口）
-                        print(f"\n********starting to generate {file_ext_text}********")
-                        x.process_video_with_ffmpeg(this_filename, file_ext_text)
-                        print(f"\n********{file_ext_text} completed generating********\n\n")
+                        success_segments = len(x.fileNameList) - len(x.failedNameList)
+                        if success_segments <= 0:
+                            print("\n********skip ffmpeg: no downloadable segments********\n")
+                        else:
+                            print(f"\n********starting to generate {file_ext_text}********")
+                            x.process_video_with_ffmpeg(this_filename, file_ext_text)
+                            print(f"\n********{file_ext_text} completed generating********\n\n")
 
                         if download_list:
                             d[str(i)] = {"url": i_url, "completed": True}
@@ -371,6 +406,7 @@ class MyConfigWindow(QMainWindow):
         self.ui = Ui_ConfigWindow()
         self.ui.setupUi(self)
         self.ui.proxyPasswordEdit.setEchoMode(QLineEdit.Password)
+        self.ui.headlessCheckBox.setToolTip("开启更快更稳；关闭可观察页面行为，便于排查。")
 
         # 信号槽
         self._safe_reconnect(self.ui.openFolderButton.clicked, self.on_openFolderButton_clicked)
@@ -427,6 +463,7 @@ class MyConfigWindow(QMainWindow):
             self.ui.proxyUserEdit.setText(config["proxyUser"])
             self.ui.proxyPasswordEdit.setText(config["proxyPassword"])
             self.ui.concurrentSpinBox.setValue(config["maxParallel"])
+            self.ui.headlessCheckBox.setChecked(config["monitorHeadless"])
             self.on_deepCheckBox_toggled(config["deep"])
             self.on_proxyCheckBox_toggled(config["proxyEnabled"])
         except Exception:
@@ -455,6 +492,7 @@ class MyConfigWindow(QMainWindow):
         self.ui.proxyUserEdit.setText(config["proxyUser"])
         self.ui.proxyPasswordEdit.setText(config["proxyPassword"])
         self.ui.concurrentSpinBox.setValue(config["maxParallel"])
+        self.ui.headlessCheckBox.setChecked(config["monitorHeadless"])
         self.on_deepCheckBox_toggled(config["deep"])
         self.on_proxyCheckBox_toggled(config["proxyEnabled"])
 
@@ -477,6 +515,7 @@ class MyConfigWindow(QMainWindow):
         updated["proxyUser"] = self.ui.proxyUserEdit.text().strip()
         updated["proxyPassword"] = self.ui.proxyPasswordEdit.text().strip()
         updated["maxParallel"] = self.ui.concurrentSpinBox.value()
+        updated["monitorHeadless"] = self.ui.headlessCheckBox.isChecked()
         self.Config.data = normalize_config_dict(updated)
         self.Config.write()
         self.loadConfig()
@@ -568,12 +607,13 @@ class MyWindow(QMainWindow):
                 "proxyEnabled": run_config["proxyEnabled"],
                 "proxyAddress": run_config["proxyAddress"],
                 "proxyPort": run_config["proxyPort"],
-                "proxyUser": run_config["proxyUser"],
-                "proxyPassword": run_config["proxyPassword"],
-                "maxParallel": run_config["maxParallel"],
-                "completed": config.completed,
-                "uncompleted": config.uncompleted,
-            }
+            "proxyUser": run_config["proxyUser"],
+            "proxyPassword": run_config["proxyPassword"],
+            "maxParallel": run_config["maxParallel"],
+            "monitorHeadless": run_config["monitorHeadless"],
+            "completed": config.completed,
+            "uncompleted": config.uncompleted,
+        }
 
             self.worker = Worker(passing_dict, False)
             self.worker.started.connect(self.on_worker_started)
@@ -610,6 +650,7 @@ class MyWindow(QMainWindow):
             "proxyUser": config["proxyUser"],
             "proxyPassword": config["proxyPassword"],
             "maxParallel": config["maxParallel"],
+            "monitorHeadless": config["monitorHeadless"],
         }
 
         self.worker = Worker(passing_dict)
