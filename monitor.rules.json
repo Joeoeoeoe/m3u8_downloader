@@ -1,0 +1,114 @@
+{
+    "chains": {
+        "monitor_first_pass": [
+            {
+                "type": "extract",
+                "args": {}
+            },
+            {
+                "type": "play_media",
+                "args": {
+                    "target": "page"
+                }
+            },
+            {
+                "type": "wait_for_candidates",
+                "args": {
+                    "ms": 1400
+                }
+            },
+            {
+                "type": "click",
+                "args": {
+                    "selectors": [
+                        "$player"
+                    ],
+                    "repeat": 1,
+                    "wait_for_candidates_ms": 1800
+                }
+            },
+            {
+                "type": "recover",
+                "args": {}
+            },
+            {
+                "type": "extract",
+                "args": {}
+            }
+        ],
+        "monitor_retry_pass": [
+            {
+                "type": "click",
+                "args": {
+                    "target": "all",
+                    "selectors": [
+                        "$player"
+                    ],
+                    "repeat": 2,
+                    "wait_for_candidates_ms": 1500
+                }
+            },
+            {
+                "type": "scroll",
+                "args": {
+                    "deltas": [
+                        240,
+                        800,
+                        1500
+                    ],
+                    "wait_for_candidates_ms": 1200
+                }
+            },
+            {
+                "type": "mouse_click",
+                "args": {
+                    "position": {
+                        "x": "center",
+                        "y": "center"
+                    },
+                    "button": "left"
+                }
+            },
+            {
+                "type": "press",
+                "args": {
+                    "key": "Space"
+                }
+            },
+            {
+                "type": "wait_for_candidates",
+                "args": {
+                    "ms": 1200
+                }
+            },
+            {
+                "type": "recover",
+                "args": {}
+            },
+            {
+                "type": "extract",
+                "args": {}
+            }
+        ]
+    },
+    "global": {
+        "actions": [
+            {
+                "type": "chain",
+                "when": "first",
+                "args": {
+                    "name": "monitor_first_pass"
+                }
+            },
+            {
+                "type": "chain",
+                "when": "retry",
+                "args": {
+                    "name": "monitor_retry_pass"
+                }
+            }
+        ]
+    },
+    "sites": [
+    ]
+}

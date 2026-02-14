@@ -46,6 +46,7 @@ def default_config():
         "proxyPassword": "",
         "maxParallel": 100,
         "monitorHeadless": True,
+        "monitorRulesPath": "monitor.rules.json",
     }
 
 
@@ -119,6 +120,9 @@ def normalize_config_dict(data):
     deep_enabled = _to_bool(merged.get("deep"), defaults["deep"])
     depth = _to_int(merged.get("depth"), defaults["depth"], 1, 3)
     monitor_headless = _to_bool(merged.get("monitorHeadless"), defaults["monitorHeadless"])
+    monitor_rules_path = _to_text(merged.get("monitorRulesPath"), defaults["monitorRulesPath"])
+    if monitor_rules_path == "":
+        monitor_rules_path = defaults["monitorRulesPath"]
 
     folder = _to_text(merged.get("folder"), defaults["folder"]) or defaults["folder"]
     filename = _to_text(merged.get("filename"), defaults["filename"]) or defaults["filename"]
@@ -151,6 +155,7 @@ def normalize_config_dict(data):
         "proxyPassword": proxy["password"],
         "maxParallel": max_parallel,
         "monitorHeadless": monitor_headless,
+        "monitorRulesPath": monitor_rules_path,
     }
     if "URL" in incoming:
         normalized["URL"] = _to_text(incoming.get("URL"), "")
@@ -221,6 +226,7 @@ class Worker(QThread):
             )
         self.monitorConfig = {
             "headless": _to_bool(config.get("monitorHeadless", True), True),
+            "rules_path": _to_text(config.get("monitorRulesPath", "")),
         }
 
         self.monitor = monitor  # 是否进行监测（是否使用加载的列表）
@@ -281,6 +287,8 @@ class Worker(QThread):
                 print(f"\t\t****Max parallel={max_parallel}****")
                 print(f"\t\t****Proxy={'ON' if proxy_config['enabled'] else 'OFF'}****")
                 print(f"\t\t****Monitor headless={monitor_config['headless']}****")
+                if monitor_config.get("rules_path", "") != "":
+                    print(f"\t\t****Monitor rules path={monitor_config['rules_path']}****")
                 if proxy_config["enabled"]:
                     print(
                         f"\t\t    >> {proxy_config['address']}:{proxy_config['port']} "
@@ -339,6 +347,7 @@ class Worker(QThread):
                     "proxyPassword": proxy_config["password"],
                     "maxParallel": max_parallel,
                     "monitorHeadless": monitor_config["headless"],
+                    "monitorRulesPath": monitor_config.get("rules_path", ""),
                 }
                 d = {"Config": d_config}
 
@@ -607,13 +616,14 @@ class MyWindow(QMainWindow):
                 "proxyEnabled": run_config["proxyEnabled"],
                 "proxyAddress": run_config["proxyAddress"],
                 "proxyPort": run_config["proxyPort"],
-            "proxyUser": run_config["proxyUser"],
-            "proxyPassword": run_config["proxyPassword"],
-            "maxParallel": run_config["maxParallel"],
-            "monitorHeadless": run_config["monitorHeadless"],
-            "completed": config.completed,
-            "uncompleted": config.uncompleted,
-        }
+                "proxyUser": run_config["proxyUser"],
+                "proxyPassword": run_config["proxyPassword"],
+                "maxParallel": run_config["maxParallel"],
+                "monitorHeadless": run_config["monitorHeadless"],
+                "monitorRulesPath": run_config.get("monitorRulesPath", ""),
+                "completed": config.completed,
+                "uncompleted": config.uncompleted,
+            }
 
             self.worker = Worker(passing_dict, False)
             self.worker.started.connect(self.on_worker_started)
@@ -651,6 +661,7 @@ class MyWindow(QMainWindow):
             "proxyPassword": config["proxyPassword"],
             "maxParallel": config["maxParallel"],
             "monitorHeadless": config["monitorHeadless"],
+            "monitorRulesPath": config.get("monitorRulesPath", ""),
         }
 
         self.worker = Worker(passing_dict)

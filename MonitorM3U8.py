@@ -1,4 +1,6 @@
 import base64
+import fnmatch
+import json
 import os
 import re
 import threading
@@ -27,6 +29,10 @@ class MonitorM3U8:
         ".player .play",
         "[data-testid*='play' i]",
     ]
+    DEFAULT_RULES_PATH = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "monitor.rules.json",
+    )
 
     @staticmethod
     def _default_user_agent():
@@ -35,6 +41,40 @@ class MonitorM3U8:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/139.0.0.0 Safari/537.36"
         )
+
+    @staticmethod
+    def _to_bool(value, default=False):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(value, (int, float)):
+            return value != 0
+        return default
+
+    @staticmethod
+    def _to_int(value, default=0, min_value=None, max_value=None):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = default
+        if min_value is not None:
+            number = max(min_value, number)
+        if max_value is not None:
+            number = min(max_value, number)
+        return number
+
+    @staticmethod
+    def _to_text_list(value):
+        if isinstance(value, (list, tuple, set)):
+            items = []
+            for item in value:
+                text = str(item).strip()
+                if text:
+                    items.append(text)
+            return items
+        text = str(value).strip() if value is not None else ""
+        return [text] if text else []
 
     def __init__(self, URL, deep=True, depth=2, proxy_config=None, monitor_config=None):
         self.timer = TimerTimer(1, self.TimerPrint)
@@ -59,6 +99,9 @@ class MonitorM3U8:
             "cookies": [],
             "referer_map": {},
         }
+        self.monitor_rules = self._load_monitor_rules()
+        self.active_interaction_rule = self._resolve_active_interaction_rule(self.URL)
+        self.action_handlers = self._build_action_handlers()
 
     @staticmethod
     def _normalize_proxy_config(proxy_config):
@@ -86,27 +129,26 @@ class MonitorM3U8:
     def _normalize_monitor_config(monitor_config):
         data = monitor_config if isinstance(monitor_config, dict) else {}
 
-        def _to_bool(value, default):
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                return value.strip().lower() in ["1", "true", "on", "yes"]
-            if isinstance(value, (int, float)):
-                return value != 0
-            return default
-
         # 兼容老逻辑：仍允许通过环境变量覆盖无界面模式
         env_headless = str(os.getenv("M3U8_MONITOR_HEADLESS", "")).strip().lower()
         env_headless_value = None
         if env_headless != "":
             env_headless_value = env_headless not in ["0", "false", "off", "no"]
 
-        headless = _to_bool(data.get("headless"), True)
+        headless = MonitorM3U8._to_bool(data.get("headless"), True)
         if env_headless_value is not None:
             headless = env_headless_value
 
+        rules_path = str(
+            data.get("rules_path")
+            or data.get("rulesPath")
+            or data.get("monitorRulesPath")
+            or ""
+        ).strip()
+
         return {
             "headless": headless,
+            "rules_path": rules_path,
         }
 
     def _playwright_proxy(self):
@@ -129,6 +171,436 @@ class MonitorM3U8:
             "referer": self.URL,
         }
         return {k: v for k, v in headers.items() if v}
+
+    def _resolve_rules_path(self, raw_path):
+        path = str(raw_path or "").strip() or self.DEFAULT_RULES_PATH
+        expanded = os.path.expanduser(os.path.expandvars(path))
+        if os.path.isabs(expanded):
+            return os.path.normpath(expanded)
+        if os.path.dirname(expanded) == "":
+            return os.path.normpath(
+                os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    expanded,
+                )
+            )
+        return os.path.normpath(os.path.join(os.getcwd(), expanded))
+
+    @classmethod
+    def _builtin_default_rules(cls):
+        return {
+            "chains": {
+                "monitor_first_pass": [
+                    {
+                        "type": "extract",
+                        "args": {},
+                    },
+                    {
+                        "type": "play_media",
+                        "args": {
+                            "target": "page",
+                        },
+                    },
+                    {
+                        "type": "wait_for_candidates",
+                        "args": {
+                            "ms": 1400,
+                        },
+                    },
+                    {
+                        "type": "click",
+                        "args": {
+                            "selectors": [
+                                "$player",
+                            ],
+                            "repeat": 1,
+                            "wait_for_candidates_ms": 1800,
+                        },
+                    },
+                    {
+                        "type": "recover",
+                        "args": {},
+                    },
+                    {
+                        "type": "extract",
+                        "args": {},
+                    },
+                ],
+                "monitor_retry_pass": [
+                    {
+                        "type": "click",
+                        "args": {
+                            "selectors": [
+                                "$player",
+                            ],
+                            "target": "all",
+                            "repeat": 2,
+                            "wait_for_candidates_ms": 1500,
+                        },
+                    },
+                    {
+                        "type": "scroll",
+                        "args": {
+                            "deltas": [240, 800, 1500],
+                            "wait_for_candidates_ms": 1200,
+                        },
+                    },
+                    {
+                        "type": "mouse_click",
+                        "args": {
+                            "position": {
+                                "x": "center",
+                                "y": "center",
+                            }
+                        },
+                    },
+                    {
+                        "type": "press",
+                        "args": {
+                            "key": "Space",
+                        },
+                    },
+                    {
+                        "type": "wait_for_candidates",
+                        "args": {
+                            "ms": 1200,
+                        },
+                    },
+                    {
+                        "type": "recover",
+                        "args": {},
+                    },
+                    {
+                        "type": "extract",
+                        "args": {},
+                    },
+                ],
+            },
+            "global": {
+                "actions": [
+                    {
+                        "type": "chain",
+                        "args": {
+                            "name": "monitor_first_pass",
+                        },
+                        "when": "first",
+                    },
+                    {
+                        "type": "chain",
+                        "args": {
+                            "name": "monitor_retry_pass",
+                        },
+                        "when": "retry",
+                    },
+                ],
+            },
+            "sites": [],
+        }
+
+    @staticmethod
+    def _safe_write_json(file_path, data):
+        folder = os.path.dirname(file_path)
+        if folder != "":
+            os.makedirs(folder, exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+
+    def _ensure_rules_file(self, rules_path):
+        if os.path.exists(rules_path):
+            return
+        default_payload = self._builtin_default_rules()
+        try:
+            self._safe_write_json(rules_path, default_payload)
+            print(f"\tmonitor rules created: {rules_path}")
+        except Exception as exc:
+            print(f"\tmonitor rules create failed: {exc}")
+
+    def _repair_rules_file(self, rules_path):
+        default_payload = self._builtin_default_rules()
+        try:
+            if os.path.exists(rules_path):
+                backup_path = f"{rules_path}.broken-{time.strftime('%Y%m%d-%H%M%S')}"
+                os.replace(rules_path, backup_path)
+                print(f"\tmonitor rules backup: {backup_path}")
+        except Exception as exc:
+            print(f"\tmonitor rules backup skipped: {exc}")
+
+        try:
+            self._safe_write_json(rules_path, default_payload)
+            print(f"\tmonitor rules reset: {rules_path}")
+        except Exception as exc:
+            print(f"\tmonitor rules reset failed: {exc}")
+        return default_payload
+
+    def _normalize_action_list(self, actions):
+        if not isinstance(actions, list):
+            return []
+        normalized = []
+        for item in actions:
+            if isinstance(item, str):
+                action_type = item.strip().lower()
+                if action_type:
+                    normalized.append({"type": action_type, "args": {}})
+                continue
+            if not isinstance(item, dict):
+                continue
+            action = dict(item)
+            action_type = str(action.get("type", "")).strip().lower()
+            if action_type == "":
+                continue
+            action["type"] = action_type
+            args = action.get("args")
+            if not isinstance(args, dict):
+                args = {}
+            # 兼容旧风格：将顶层参数自动归并到 args，统一后续处理方式
+            for key in list(action.keys()):
+                if key in self._action_meta_keys():
+                    continue
+                if key not in args:
+                    args[key] = action[key]
+                action.pop(key, None)
+            action["args"] = args
+            normalized.append(action)
+        return normalized
+
+    @staticmethod
+    def _action_meta_keys():
+        return {"type", "when", "args"}
+
+    def _action_has_arg(self, action, key):
+        if not isinstance(action, dict):
+            return False
+        args = action.get("args", {})
+        if isinstance(args, dict) and key in args:
+            return True
+        return key in action
+
+    def _action_arg(self, action, key, default=None):
+        if not isinstance(action, dict):
+            return default
+        args = action.get("args", {})
+        if isinstance(args, dict) and key in args:
+            return args.get(key)
+        if key in action:
+            return action.get(key)
+        return default
+
+    def _normalize_chain_map(self, chains):
+        normalized = {}
+        if not isinstance(chains, dict):
+            return normalized
+        for raw_name, raw_actions in chains.items():
+            name = str(raw_name).strip()
+            if name == "":
+                continue
+            normalized[name] = self._normalize_action_list(raw_actions)
+        return normalized
+
+    def _expand_action_chains(self, actions, chains, trace=None, depth=0):
+        if depth > 10:
+            print("\tmonitor rules action chain depth exceeded")
+            return []
+
+        if trace is None:
+            trace = []
+        expanded = []
+
+        for raw_action in actions:
+            if not isinstance(raw_action, dict):
+                continue
+            action = dict(raw_action)
+            action_type = str(action.get("type", "")).strip().lower()
+            if action_type != "chain":
+                expanded.append(action)
+                continue
+
+            args = action.get("args", {})
+            chain_name = str((args.get("name") if isinstance(args, dict) else None) or action.get("name", "")).strip()
+            if chain_name == "":
+                print("\tmonitor rules chain action skipped: missing name")
+                continue
+            if chain_name in trace:
+                print(
+                    f"\tmonitor rules chain skipped: circular reference "
+                    f"{' -> '.join(trace + [chain_name])}"
+                )
+                continue
+            if chain_name not in chains:
+                print(f"\tmonitor rules chain skipped: not found '{chain_name}'")
+                continue
+
+            nested_actions = self._expand_action_chains(
+                chains[chain_name],
+                chains,
+                trace=trace + [chain_name],
+                depth=depth + 1,
+            )
+            override_when = str(
+                action.get("when", (args.get("when") if isinstance(args, dict) else ""))
+            ).strip().lower()
+            if override_when == "":
+                expanded.extend(nested_actions)
+                continue
+            for nested_action in nested_actions:
+                updated = dict(nested_action)
+                if "when" not in updated:
+                    updated["when"] = override_when
+                expanded.append(updated)
+
+        return expanded
+
+    def _normalize_rule_entry(self, source, default_name):
+        if not isinstance(source, dict):
+            return None
+        if not self._to_bool(source.get("enabled", True), True):
+            return None
+
+        match = source.get("match", {})
+        if not isinstance(match, dict):
+            match = {}
+
+        host_value = match.get("host", source.get("host", source.get("hosts", [])))
+        contains_value = match.get(
+            "url_contains",
+            source.get("url_contains", source.get("urlContains", [])),
+        )
+        url_regex = str(
+            match.get(
+                "url_regex",
+                source.get("url_regex", source.get("urlRegex", "")),
+            )
+            or ""
+        ).strip()
+
+        actions = self._normalize_action_list(source.get("actions", []))
+        chains = self._normalize_chain_map(source.get("chains", {}))
+
+        return {
+            "name": str(source.get("name", default_name)).strip() or default_name,
+            "host_patterns": [item.lower() for item in self._to_text_list(host_value)],
+            "url_contains": [item.lower() for item in self._to_text_list(contains_value)],
+            "url_regex": url_regex,
+            "actions": actions,
+            "chains": chains,
+        }
+
+    def _load_monitor_rules(self):
+        rules_path = self._resolve_rules_path(self.monitor_config.get("rules_path", ""))
+        self._ensure_rules_file(rules_path)
+
+        payload = {}
+        try:
+            with open(rules_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                raise ValueError("root must be object")
+        except Exception as exc:
+            print(f"\tmonitor rules load failed: {exc}")
+            payload = self._repair_rules_file(rules_path)
+
+        default_global = {
+            "name": "global",
+            "host_patterns": [],
+            "url_contains": [],
+            "url_regex": "",
+            "actions": [],
+            "chains": {},
+        }
+        normalized = {
+            "source": rules_path,
+            "chains": self._normalize_chain_map(payload.get("chains", {})),
+            "global": default_global,
+            "sites": [],
+        }
+
+        if not isinstance(payload, dict):
+            return normalized
+
+        global_source = payload.get("global")
+        if not isinstance(global_source, dict):
+            global_source = {}
+        if "actions" in payload and "actions" not in global_source:
+            global_source["actions"] = payload["actions"]
+        if "chains" in payload and "chains" not in global_source:
+            global_source["chains"] = payload["chains"]
+
+        global_rule = self._normalize_rule_entry(global_source, "global")
+        if global_rule is not None:
+            global_rule["host_patterns"] = []
+            global_rule["url_contains"] = []
+            global_rule["url_regex"] = ""
+            merged_global_chains = dict(normalized["chains"])
+            merged_global_chains.update(global_rule.get("chains", {}))
+            global_rule["chains"] = merged_global_chains
+            global_rule["actions"] = self._expand_action_chains(
+                global_rule.get("actions", []),
+                merged_global_chains,
+            )
+            normalized["chains"] = merged_global_chains
+            normalized["global"] = global_rule
+
+        sites = payload.get("sites", [])
+        if isinstance(sites, list):
+            for index, site in enumerate(sites):
+                normalized_site = self._normalize_rule_entry(site, f"site_{index + 1}")
+                if normalized_site is not None:
+                    merged_site_chains = dict(normalized["chains"])
+                    merged_site_chains.update(normalized_site.get("chains", {}))
+                    normalized_site["chains"] = merged_site_chains
+                    normalized_site["actions"] = self._expand_action_chains(
+                        normalized_site.get("actions", []),
+                        merged_site_chains,
+                    )
+                    normalized["sites"].append(normalized_site)
+
+        return normalized
+
+    def _rule_matches_url(self, rule, url):
+        if not isinstance(rule, dict):
+            return False
+
+        normalized_url = self._normalize_url(url) or str(url or "")
+        lowered_url = normalized_url.lower()
+        parsed = urlparse(normalized_url)
+        host = (parsed.hostname or "").lower()
+
+        host_patterns = rule.get("host_patterns", [])
+        if host_patterns and not any(fnmatch.fnmatch(host, pattern) for pattern in host_patterns):
+            return False
+
+        url_contains = rule.get("url_contains", [])
+        if url_contains and not any(keyword in lowered_url for keyword in url_contains):
+            return False
+
+        url_regex = str(rule.get("url_regex", "")).strip()
+        if url_regex != "":
+            try:
+                if re.search(url_regex, normalized_url, flags=re.IGNORECASE) is None:
+                    return False
+            except re.error:
+                return False
+
+        return True
+
+    def _resolve_active_interaction_rule(self, target_url):
+        global_rule = self.monitor_rules.get("global", {})
+        active = {
+            "name": str(global_rule.get("name", "global")).strip() or "global",
+            "source": self.monitor_rules.get("source", ""),
+            "matched_sites": [],
+            "actions": list(global_rule.get("actions", [])),
+        }
+
+        for site_rule in self.monitor_rules.get("sites", []):
+            if not self._rule_matches_url(site_rule, target_url):
+                continue
+            active["matched_sites"].append(site_rule.get("name", "site"))
+            active["actions"].extend(site_rule.get("actions", []))
+
+        if active["matched_sites"]:
+            active["name"] = ",".join(active["matched_sites"])
+
+        return active
 
     @staticmethod
     def _domain_key(url):
@@ -622,22 +1094,32 @@ class MonitorM3U8:
             page.wait_for_timeout(250)
         return False
 
-    def _try_click_selectors(self, target, selectors, page_for_recover=None, stable_url=""):
+    def _try_click_selectors(
+        self,
+        target,
+        selectors,
+        page_for_recover=None,
+        stable_url="",
+        max_per_selector=2,
+        visible_timeout_ms=600,
+        click_timeout_ms=1400,
+        wait_after_click_ms=250,
+    ):
         for selector in selectors:
             try:
                 locator = target.locator(selector)
-                count = min(locator.count(), 2)
+                count = min(locator.count(), max_per_selector)
             except Exception:
                 continue
 
             for i in range(count):
                 try:
                     element = locator.nth(i)
-                    if not element.is_visible(timeout=600):
+                    if not element.is_visible(timeout=visible_timeout_ms):
                         continue
-                    element.click(timeout=1400)
+                    element.click(timeout=click_timeout_ms)
                     if page_for_recover is not None:
-                        page_for_recover.wait_for_timeout(250)
+                        page_for_recover.wait_for_timeout(wait_after_click_ms)
                         self._recover_page_if_needed(page_for_recover, stable_url or self.URL)
                     return True
                 except Exception:
@@ -714,70 +1196,342 @@ class MonitorM3U8:
             cookies = []
         self.session_hints["cookies"] = self._merge_cookies(self.session_hints.get("cookies", []), cookies)
 
-    def _try_trigger_player(self, page, interaction_stage=1):
-        stable_url = self._normalize_url(page.url) or self.URL
+    @staticmethod
+    def _action_enabled_for_interaction_stage(action, interaction_stage):
+        if not isinstance(action, dict):
+            return False
+        args = action.get("args", {})
+        args_when = args.get("when", "all") if isinstance(args, dict) else "all"
+        when = str(action.get("when", args_when)).strip().lower()
+        if when in {"", "all"}:
+            return True
+        if when == "first":
+            return interaction_stage <= 1
+        if when == "retry":
+            return interaction_stage > 1
+        return True
 
-        before = len(self.possible)
+    def _build_action_handlers(self):
+        return {
+            "extract": self._action_extract,
+            "recover": self._action_recover,
+            "wait": self._action_wait,
+            "wait_for_candidates": self._action_wait_for_candidates,
+            "play_media": self._action_play_media,
+            "click": self._action_click,
+            "hover": self._action_hover,
+            "fill": self._action_fill,
+            "wait_for_selector": self._action_wait_for_selector,
+            "wait_for_load_state": self._action_wait_for_load_state,
+            "goto": self._action_goto,
+            "evaluate": self._action_evaluate,
+            "scroll": self._action_scroll,
+            "mouse_click": self._action_mouse_click,
+            "press": self._action_press,
+            "log": self._action_log,
+        }
+
+    def _iter_action_targets(self, page, target_mode):
+        mode = str(target_mode or "page").strip().lower()
+        frames = [frame for frame in page.frames if frame != page.main_frame]
+        if mode in {"frame", "frames"}:
+            return frames
+        if mode in {"all", "page_and_frames"}:
+            return [page] + frames
+        return [page]
+
+    def _resolve_action_selectors(self, action):
+        selectors = []
+        raw_selectors = self._action_arg(action, "selectors", [])
+        if raw_selectors:
+            selectors.extend(self._to_text_list(raw_selectors))
+        raw_selector = self._action_arg(action, "selector", "")
+        if raw_selector:
+            selectors.extend(self._to_text_list(raw_selector))
+
+        resolved = []
+        for selector in selectors:
+            key = selector.strip().lower()
+            if key == "$player":
+                resolved.extend(self.PLAYER_SELECTORS)
+            else:
+                resolved.append(selector)
+        return list(dict.fromkeys(resolved))
+
+    @staticmethod
+    def _wait_until_value(raw_value, default="domcontentloaded"):
+        value = str(raw_value or "").strip().lower()
+        if value in {"domcontentloaded", "load", "networkidle", "commit"}:
+            return value
+        return default
+
+    def _resolve_mouse_coordinate(self, raw_value, fallback):
+        if isinstance(raw_value, str) and raw_value.strip().lower() in {"center", "middle"}:
+            return fallback
+        return self._to_int(raw_value, fallback)
+
+    def _action_extract(self, page, action, stable_url, before_count):
         self._extract_candidates_from_page(page)
-        self._try_play_media_elements(page)
-        self._wait_for_new_candidates(page, before, timeout_ms=1400)
+
+    def _action_recover(self, page, action, stable_url, before_count):
         self._recover_page_if_needed(page, stable_url)
 
-        if interaction_stage <= 0:
+    def _action_wait(self, page, action, stable_url, before_count):
+        wait_ms = self._to_int(self._action_arg(action, "ms", 300), 300, 0, 30000)
+        if wait_ms > 0:
+            page.wait_for_timeout(wait_ms)
+
+    def _action_wait_for_candidates(self, page, action, stable_url, before_count):
+        timeout_ms = self._to_int(self._action_arg(action, "ms", 1500), 1500, 0, 30000)
+        self._wait_for_new_candidates(page, before_count, timeout_ms=timeout_ms)
+
+    def _action_play_media(self, page, action, stable_url, before_count):
+        for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
+            self._try_play_media_elements(target)
+
+    def _action_click(self, page, action, stable_url, before_count):
+        selectors = self._resolve_action_selectors(action)
+        if len(selectors) == 0:
             return
 
-        click_rounds = 1 if interaction_stage == 1 else 2
-        for _ in range(click_rounds):
-            before = len(self.possible)
-            self._try_click_selectors(
-                page,
-                self.PLAYER_SELECTORS,
-                page_for_recover=page,
-                stable_url=stable_url,
-            )
-            page.wait_for_timeout(300)
-            if self._wait_for_new_candidates(page, before, timeout_ms=1800):
-                break
+        repeat = self._to_int(self._action_arg(action, "repeat", 1), 1, 1, 20)
+        wait_ms = self._to_int(self._action_arg(action, "wait_ms", 300), 300, 0, 30000)
+        max_per_selector = self._to_int(self._action_arg(action, "max_per_selector", 2), 2, 1, 20)
+        visible_timeout_ms = self._to_int(self._action_arg(action, "visible_timeout_ms", 600), 600, 100, 10000)
+        click_timeout_ms = self._to_int(self._action_arg(action, "click_timeout_ms", 1400), 1400, 100, 20000)
+        wait_after_click_ms = self._to_int(self._action_arg(action, "wait_after_click_ms", 250), 250, 0, 10000)
+        wait_for_candidates_ms = self._to_int(
+            self._action_arg(action, "wait_for_candidates_ms", 0),
+            0,
+            0,
+            30000,
+        )
 
-        if interaction_stage <= 1:
-            self._extract_candidates_from_page(page)
+        for _ in range(repeat):
+            for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
+                self._try_click_selectors(
+                    target,
+                    selectors,
+                    page_for_recover=page,
+                    stable_url=stable_url,
+                    max_per_selector=max_per_selector,
+                    visible_timeout_ms=visible_timeout_ms,
+                    click_timeout_ms=click_timeout_ms,
+                    wait_after_click_ms=wait_after_click_ms,
+                )
+            if wait_ms > 0:
+                page.wait_for_timeout(wait_ms)
+            if wait_for_candidates_ms > 0:
+                self._wait_for_new_candidates(page, before_count, timeout_ms=wait_for_candidates_ms)
+
+    def _action_hover(self, page, action, stable_url, before_count):
+        selectors = self._resolve_action_selectors(action)
+        if len(selectors) == 0:
             return
 
-        for scroll_y in [240, 800, 1500]:
-            before = len(self.possible)
+        repeat = self._to_int(self._action_arg(action, "repeat", 1), 1, 1, 20)
+        max_per_selector = self._to_int(self._action_arg(action, "max_per_selector", 1), 1, 1, 20)
+        visible_timeout_ms = self._to_int(self._action_arg(action, "visible_timeout_ms", 600), 600, 100, 10000)
+        hover_timeout_ms = self._to_int(self._action_arg(action, "hover_timeout_ms", 1200), 1200, 100, 20000)
+        wait_ms = self._to_int(self._action_arg(action, "wait_ms", 200), 200, 0, 30000)
+        wait_for_candidates_ms = self._to_int(self._action_arg(action, "wait_for_candidates_ms", 0), 0, 0, 30000)
+
+        for _ in range(repeat):
+            for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
+                for selector in selectors:
+                    try:
+                        locator = target.locator(selector)
+                        count = min(locator.count(), max_per_selector)
+                    except Exception:
+                        continue
+
+                    for index in range(count):
+                        try:
+                            element = locator.nth(index)
+                            if not element.is_visible(timeout=visible_timeout_ms):
+                                continue
+                            element.hover(timeout=hover_timeout_ms)
+                            break
+                        except Exception:
+                            continue
+
+            if wait_ms > 0:
+                page.wait_for_timeout(wait_ms)
+            if wait_for_candidates_ms > 0:
+                self._wait_for_new_candidates(page, before_count, timeout_ms=wait_for_candidates_ms)
+
+    def _action_fill(self, page, action, stable_url, before_count):
+        selectors = self._resolve_action_selectors(action)
+        if len(selectors) == 0:
+            return
+
+        value = str(self._action_arg(action, "value", ""))
+        index = self._to_int(self._action_arg(action, "index", 0), 0, 0)
+        fill_timeout_ms = self._to_int(self._action_arg(action, "fill_timeout_ms", 2500), 2500, 100, 30000)
+        visible_timeout_ms = self._to_int(self._action_arg(action, "visible_timeout_ms", 600), 600, 100, 10000)
+        require_visible = self._to_bool(self._action_arg(action, "require_visible", True), True)
+        submit_key = str(self._action_arg(action, "submit_key", "")).strip()
+
+        for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
+            for selector in selectors:
+                try:
+                    locator = target.locator(selector)
+                    count = locator.count()
+                except Exception:
+                    continue
+                if count <= 0:
+                    continue
+                current_index = min(index, count - 1)
+                try:
+                    element = locator.nth(current_index)
+                    if require_visible and not element.is_visible(timeout=visible_timeout_ms):
+                        continue
+                    element.fill(value, timeout=fill_timeout_ms)
+                    if submit_key != "":
+                        element.press(submit_key, timeout=fill_timeout_ms)
+                    return
+                except Exception:
+                    continue
+
+    def _action_wait_for_selector(self, page, action, stable_url, before_count):
+        selector = str(self._action_arg(action, "selector", "")).strip()
+        if selector == "":
+            return
+        timeout_ms = self._to_int(self._action_arg(action, "timeout_ms", 5000), 5000, 100, 60000)
+        state = str(self._action_arg(action, "state", "visible")).strip().lower() or "visible"
+
+        for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
             try:
-                page.mouse.wheel(0, scroll_y)
+                target.wait_for_selector(selector, state=state, timeout=timeout_ms)
+                return
+            except Exception:
+                continue
+
+    def _action_wait_for_load_state(self, page, action, stable_url, before_count):
+        state = self._wait_until_value(self._action_arg(action, "state"), default="networkidle")
+        timeout_ms = self._to_int(self._action_arg(action, "timeout_ms", 8000), 8000, 100, 60000)
+        page.wait_for_load_state(state, timeout=timeout_ms)
+
+    def _action_goto(self, page, action, stable_url, before_count):
+        raw_url = str(self._action_arg(action, "url", "")).strip()
+        if raw_url == "":
+            return
+        target_url = self._normalize_url(raw_url, stable_url)
+        if target_url == "":
+            return
+        wait_until = self._wait_until_value(self._action_arg(action, "wait_until"), default="domcontentloaded")
+        timeout_ms = self._to_int(self._action_arg(action, "timeout_ms", 18000), 18000, 100, 120000)
+        page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
+
+    def _action_evaluate(self, page, action, stable_url, before_count):
+        script = self._action_arg(action, "script")
+        if not isinstance(script, str) or script.strip() == "":
+            return
+        script = script.strip()
+        selector = str(self._action_arg(action, "selector", "")).strip()
+        arg = self._action_arg(action, "arg")
+
+        if selector == "":
+            if self._action_has_arg(action, "arg"):
+                page.evaluate(script, arg)
+            else:
+                page.evaluate(script)
+            return
+
+        for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
+            try:
+                if self._action_has_arg(action, "arg"):
+                    target.eval_on_selector_all(selector, script, arg)
+                else:
+                    target.eval_on_selector_all(selector, script)
+                return
+            except Exception:
+                continue
+
+    def _action_scroll(self, page, action, stable_url, before_count):
+        deltas = self._action_arg(action, "deltas", [])
+        if not isinstance(deltas, list) or len(deltas) == 0:
+            deltas = [self._action_arg(action, "y", 240)]
+        wheel_x = self._to_int(self._action_arg(action, "x", 0), 0)
+        wait_after_scroll_ms = self._to_int(self._action_arg(action, "wait_after_scroll_ms", 250), 250, 0, 30000)
+        wait_for_candidates_ms = self._to_int(
+            self._action_arg(action, "wait_for_candidates_ms", 1200),
+            1200,
+            0,
+            30000,
+        )
+        recover_after_scroll = self._to_bool(self._action_arg(action, "recover_after_scroll", True), True)
+
+        for delta in deltas:
+            try:
+                page.mouse.wheel(wheel_x, self._to_int(delta, 0))
             except Exception:
                 pass
-            page.wait_for_timeout(250)
-            self._wait_for_new_candidates(page, before, timeout_ms=1200)
-            self._recover_page_if_needed(page, stable_url)
+            if wait_after_scroll_ms > 0:
+                page.wait_for_timeout(wait_after_scroll_ms)
+            if wait_for_candidates_ms > 0:
+                self._wait_for_new_candidates(page, before_count, timeout_ms=wait_for_candidates_ms)
+            if recover_after_scroll:
+                self._recover_page_if_needed(page, stable_url)
 
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            before = len(self.possible)
-            self._try_play_media_elements(frame)
-            self._try_click_selectors(
-                frame,
-                self.PLAYER_SELECTORS,
-                page_for_recover=page,
-                stable_url=stable_url,
-            )
-            self._wait_for_new_candidates(page, before, timeout_ms=1400)
-            self._recover_page_if_needed(page, stable_url)
-
+    def _action_mouse_click(self, page, action, stable_url, before_count):
         viewport = page.viewport_size or {"width": 1280, "height": 720}
+        position = self._action_arg(action, "position", {})
+        if not isinstance(position, dict):
+            position = {}
+        x = self._resolve_mouse_coordinate(
+            position.get("x", self._action_arg(action, "x", viewport["width"] // 2)),
+            viewport["width"] // 2,
+        )
+        y = self._resolve_mouse_coordinate(
+            position.get("y", self._action_arg(action, "y", viewport["height"] // 2)),
+            viewport["height"] // 2,
+        )
+        button = str(self._action_arg(action, "button", "left")).strip().lower() or "left"
+        click_count = self._to_int(self._action_arg(action, "click_count", 1), 1, 1, 3)
+        delay_ms = self._to_int(self._action_arg(action, "delay_ms", 0), 0, 0, 3000)
+        page.mouse.click(x, y, button=button, click_count=click_count, delay=delay_ms)
+
+    def _action_press(self, page, action, stable_url, before_count):
+        key = str(self._action_arg(action, "key", "")).strip()
+        if key == "":
+            return
+        page.keyboard.press(key)
+
+    def _action_log(self, page, action, stable_url, before_count):
+        message = str(self._action_arg(action, "message", "")).strip()
+        if message:
+            print(f"\tmonitor rule action: {message}")
+
+    def _run_configured_interaction_action(self, page, action, stable_url):
+        if not isinstance(action, dict):
+            return
+
+        action_type = str(action.get("type", "")).strip().lower()
+        if action_type == "":
+            return
+        handler = self.action_handlers.get(action_type)
+        if handler is None:
+            print(f"\tmonitor rule action skipped: unknown type={action_type}")
+            return
+
         before = len(self.possible)
         try:
-            page.mouse.click(viewport["width"] // 2, viewport["height"] // 2)
-            page.keyboard.press("Space")
-        except Exception:
-            pass
-        page.wait_for_timeout(500)
-        self._wait_for_new_candidates(page, before, timeout_ms=1200)
-        self._recover_page_if_needed(page, stable_url)
+            handler(page, action, stable_url, before)
+        except Exception as exc:
+            print(f"\tmonitor rule action failed ({action_type}): {exc}")
+
+    def _try_trigger_player(self, page, interaction_stage=1):
+        stable_url = self._normalize_url(page.url) or self.URL
+        actions = list(self.active_interaction_rule.get("actions", []))
+        if len(actions) == 0:
+            return
+        for action in actions:
+            if not self._action_enabled_for_interaction_stage(action, interaction_stage):
+                continue
+            self._run_configured_interaction_action(page, action, stable_url)
         self._extract_candidates_from_page(page)
+        self._recover_page_if_needed(page, stable_url)
 
     def MonitorUrl(self):
         def __launch_browser(playwright_driver, launch_kwargs):
@@ -895,6 +1649,18 @@ class MonitorM3U8:
 
         print(f"\n\t****monitor started****\nURL={self.URL}")
         print(f"\theadless={self.headless}; depth={self.depth}")
+        configured_actions_count = len(self.active_interaction_rule.get("actions", []))
+        if configured_actions_count > 0:
+            print(
+                f"\tinteraction rules active="
+                f"{self.active_interaction_rule.get('name', 'rule')} "
+                f"actions={configured_actions_count}"
+            )
+        elif self.active_interaction_rule.get("source", "") != "":
+            print(
+                f"\tinteraction rules loaded from {self.active_interaction_rule['source']}, "
+                f"but no matching actions for this URL"
+            )
         if self.proxy_config["enabled"]:
             print(
                 f"\t****proxy****\n"

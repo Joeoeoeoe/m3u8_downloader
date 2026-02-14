@@ -20,6 +20,7 @@
 - **断点续跑**：加载历史日志后可继续处理未完成项。
 - **搜索深度**：可设置深度，控制监测策略与递归。
 - **资源预测**：针对已发现 m3u8，自动尝试常见文件名（如 `index.m3u8`、`mixed.m3u8`）。
+- **规则化站点交互**：支持通过 JSON 配置站点专属点击/滚动/键盘动作，提高复杂站点抓取成功率。
 - **多格式输出**：支持 `.mp4/.mov/.avi/.m4a/.flv/.mkv`。
 - **实时日志输出**：主窗口输出识别、下载、重试与合成过程。
 
@@ -53,6 +54,16 @@
 | 递归搜索深度 | 控制网页监测深度策略（1-3） | 开启，2 |
 | 最大并行数量 | 分片下载线程池上限（1-999） | 100 |
 | 监测无界面模式 (Headless) | 监测阶段是否隐藏浏览器窗口 | 开启 |
+| 监测规则文件 (`monitorRulesPath`) | 站点定制动作规则 JSON（手动编辑 `Config.json`） | `monitor.rules.json` |
+
+### 高级监测规则（手动配置）
+
+- 在 `Config.json` 设置 `monitorRulesPath`，默认值：`"monitorRulesPath": "monitor.rules.json"`。
+- 规则支持按域名/URL 匹配，并配置点击、滚动、键盘等动作。
+- 推荐统一写法：每个动作使用 `type + when + args`（详见 `docs/monitorrules.md`）。
+- 详细字段说明见：`docs/monitorrules.md`
+- 文档示例见：`docs/monitor.rules.example.json`（示例文件不会作为运行时写入目标）
+- 若规则文件不存在，程序会自动创建默认文件；若文件损坏，会自动备份并重建。
 
 ### 关于下载列表日志
 
@@ -134,6 +145,8 @@
 
 - 如果看到 `ERR_BLOCKED_BY_CLIENT`：
   - 再关闭“监测无界面模式”，观察是否被点击后跳转到广告页。
+- 若某站点始终无法触发播放器：
+  - 使用 `monitorRulesPath` 配置该站点的专属动作（见 `docs/monitorrules.md`）。
 - 仍需命令行覆盖时，可使用环境变量 `M3U8_MONITOR_HEADLESS=0/1`。
 - 若提示 `Playwright was just installed or updated`，说明当前 Python 环境缺少浏览器内核，执行 `playwright install chromium`。
 
