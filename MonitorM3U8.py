@@ -177,7 +177,7 @@ class MonitorM3U8:
             tries = int(tries_value)
         except (TypeError, ValueError):
             tries = 3
-        tries = max(1, min(tries, 9))
+        tries = max(1, min(tries, 5))
 
         rules_path = str(data.get("rules_path") or "").strip()
 

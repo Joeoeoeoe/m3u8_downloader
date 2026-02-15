@@ -29,7 +29,7 @@
 { "monitorRulesPath": "configs/monitor.rules.json" }
 ```
 
-等价字段名：`monitorRulesPath` / `rulesPath` / `rules_path`。
+当前版本仅支持 `monitorRulesPath`（配置文件为 `config/config.json`，严格字段校验）。
 
 路径规则：
 
@@ -48,11 +48,15 @@
 monitor.rules.json.broken-20260215-103012
 ```
 
+补充：
+
+- `config/config.json` 字段不匹配时，也会备份成 `*.broken-时间戳` 并重建默认配置。
+
 ## 2. 术语与执行模型（先看这个）
 
 ### 2.1 交互与尝试
 
-一次“监测”会有多次尝试（attempt）。每次尝试会打开浏览器页面，执行动作链并抓取候选。
+一次“监测”会有多次尝试（attempt）。每次尝试会打开浏览器页面并抓取候选；只有开启交互时才会执行动作链。
 
 - `attempt=1`：首次交互
 - `attempt>=2`：重试交互
@@ -89,14 +93,14 @@ monitor.rules.json.broken-20260215-103012
 - `monitorInteraction=true`：执行动作链
 - `monitorInteraction=false`：不执行动作链（只做基础抓取）
 
-尝试次数由 `monitorTries` 控制（每个 URL 的嗅探尝试次数）。
+尝试次数由 `monitorTries` 控制（每个 URL 的嗅探尝试次数，范围 `1~5`）。
 
 ## 3. depth 简化写法（可选）
 
 `config/config.json` 里的 `depth` 支持数字或语义别名：
 
-- `off / none` → `0`
-- `lite / basic / simple` → `1`
+- `off / none / disabled` → `0`
+- `lite / light / basic / simple` → `1`
 - `standard / normal / default` → `2`（推荐）
 - `deep / full / aggressive` → `3`
 
@@ -132,18 +136,25 @@ monitor.rules.json.broken-20260215-103012
 - `global`：全局动作
 - `sites`：站点规则（按 URL 匹配追加动作）
 
+兼容说明：
+
+- 若顶层存在 `actions/chains` 且未写 `global.actions/global.chains`，程序会把顶层值并入 `global`。
+
 ## 5. `when`：更丰富的交互阶段
 
 ### 5.1 常用值
 
 - `all`：每次交互都执行（默认）
+- `*`：等价 `all`
 - `first`：仅首次交互
 - `retry`：仅重试交互（attempt>=2）
 - `last`：仅最后一次尝试
+- `none/never/skip`：始终不执行（可用于临时禁用某个 action）
 
 ### 5.2 语义别名
 
 - `init/startup/start/initial` → 等价 `first`
+- `retries/again` → 等价 `retry`
 - `final/end` → 等价 `last`
 
 ### 5.3 条件表达式（推荐）
@@ -199,6 +210,7 @@ monitor.rules.json.broken-20260215-103012
 - 链可嵌套，最大递归深度 10
 - 循环引用会跳过并打印日志
 - `chain` 自己写了 `when` 会覆盖链内未写 `when` 的动作
+- 链作用域覆盖顺序：顶层 `chains` < `global.chains` < `sites[i].chains`
 
 ## 8. 站点匹配（`sites[i].match`）
 
@@ -213,6 +225,12 @@ monitor.rules.json.broken-20260215-103012
 ```
 
 逻辑：`host`、`url_contains`、`url_regex` 之间是 AND；每一类数组内部是 OR。
+
+补充：
+
+- `host/url_contains` 按小写比较；
+- `url_regex` 使用 `re.IGNORECASE`；
+- `url_regex` 非法时，该 site 规则直接不匹配。
 
 ## 9. 通用参数约定
 
@@ -250,7 +268,7 @@ monitor.rules.json.broken-20260215-103012
 
 ## 10. Action 类型与示例
 
-下文“默认值/范围”来自程序实际约束，每个动作给一个最小示例。
+下文给每个动作的最小示例（默认值与范围以代码约束为准）。
 
 ### 10.1 `extract`
 

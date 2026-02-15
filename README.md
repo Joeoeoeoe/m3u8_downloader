@@ -9,7 +9,7 @@
 - 本项目只针对 m3u8 视频下载。
 - 下载过程包含失败列表和重试机制：默认最多重试 10 轮，若失败列表连续多轮不收敛会提前停止重试。
 - 支持代理（可用于监测页面和分片下载）。
-- 支持 URL 规则批量展开，一次输入可下载一组地址（见 `URLDecode.md`）。
+- 支持 URL 规则批量展开，一次输入可下载一组地址（见 `docs/URLDecode.md`）。
 
 ## 功能特性
 
@@ -18,7 +18,7 @@
 - **并行下载**：分片下载线程数可配置（最大并行数量）。
 - **下载日志**：每次任务写入 `Data/*.json`，可重新加载。
 - **断点续跑**：加载历史日志后可继续处理未完成项。
-- **搜索深度**：可设置深度，控制监测策略与递归。
+- **搜索深度**：可设置深度，控制递归相关行为。
 - **资源预测**：针对已发现 m3u8，自动尝试常见文件名（如 `index.m3u8`、`mixed.m3u8`）。
 - **规则化站点交互**：支持通过 JSON 配置站点专属点击/滚动/键盘动作，提高复杂站点抓取成功率。
 - **多格式输出**：支持 `.mp4/.mov/.avi/.m4a/.flv/.mkv`。
@@ -64,8 +64,8 @@
 
 - 在 `config/config.json` 设置 `monitorRulesPath`，默认值：`"monitorRulesPath": "monitor.rules.json"`。
 - 规则支持按域名/URL 匹配，并配置点击、滚动、键盘等动作。
-- 推荐统一写法：每个动作使用 `type + when + args`（详见 `docs/monitorrules.md`）。
-- 详细字段说明见：`docs/monitorrules.md`
+- 推荐统一写法：每个动作使用 `type + when + args`（详见 `docs/MONITOR_RULES.md`）。
+- 详细字段说明见：`docs/MONITOR_RULES.md`
 - 文档示例见：`docs/monitor.rules.example.json`（示例文件不会作为运行时写入目标）
 - 若规则文件不存在，程序会自动创建默认文件；若文件损坏，会自动备份并重建。
 
@@ -95,7 +95,7 @@
   - `idx`：数字范围
   - `type`：列表枚举
 
-详细说明： [关于URL解析的解释](./URLDecode.md)
+详细说明： [关于URL解析的解释](./docs/URLDecode.md)
 
 ## 使用说明
 
@@ -149,7 +149,7 @@
 - 如果看到 `ERR_BLOCKED_BY_CLIENT`：
   - 再关闭“监测无界面模式”，观察是否被点击后跳转到广告页。
 - 若某站点始终无法触发播放器：
-  - 使用 `monitorRulesPath` 配置该站点的专属动作（见 `docs/monitorrules.md`）。
+  - 使用 `monitorRulesPath` 配置该站点的专属动作（见 `docs/MONITOR_RULES.md`）。
 - 仍需命令行覆盖时，可使用环境变量 `M3U8_MONITOR_HEADLESS=0/1`。
 - 若提示 `Playwright was just installed or updated`，说明当前 Python 环境缺少浏览器内核，执行 `playwright install chromium`。
 

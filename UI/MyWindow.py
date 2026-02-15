@@ -148,6 +148,61 @@ def _validate_config_payload(payload):
     if missing or extra:
         raise ValueError(f"config schema mismatch missing={missing} extra={extra}")
 
+    bool_keys = {
+        "deep",
+        "monitorTryEnabled",
+        "monitorInteraction",
+        "downloadList",
+        "proxyEnabled",
+        "monitorHeadless",
+    }
+    int_ranges = {
+        "fileExt": (0, len(FILE_EXT_OPTIONS) - 1),
+        "depth": (1, 3),
+        "monitorTries": (1, 5),
+        "downloadMode": (0, len(DOWNLOAD_MODE_OPTIONS) - 1),
+        "stopMode": (0, len(STOP_MODE_OPTIONS) - 1),
+        "listMode": (0, 2),
+        "maxParallel": (1, 999),
+    }
+    str_keys = {
+        "folder",
+        "filename",
+        "fileExtText",
+        "downloadModeText",
+        "stopModeText",
+        "listModeText",
+        "proxyAddress",
+        "proxyPort",
+        "proxyUser",
+        "proxyPassword",
+        "monitorRulesPath",
+    }
+
+    for key in bool_keys:
+        if not isinstance(payload.get(key), bool):
+            raise ValueError(f"config value type invalid: {key} must be bool")
+
+    for key, (min_value, max_value) in int_ranges.items():
+        value = payload.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"config value type invalid: {key} must be int")
+        if value < min_value or value > max_value:
+            raise ValueError(f"config value out of range: {key}={value}")
+
+    for key in str_keys:
+        if not isinstance(payload.get(key), str):
+            raise ValueError(f"config value type invalid: {key} must be str")
+
+    if payload["fileExtText"] not in FILE_EXT_OPTIONS:
+        raise ValueError(f"config value invalid: fileExtText={payload['fileExtText']}")
+    if payload["downloadModeText"] not in DOWNLOAD_MODE_OPTIONS:
+        raise ValueError(f"config value invalid: downloadModeText={payload['downloadModeText']}")
+    if payload["stopModeText"] not in STOP_MODE_OPTIONS:
+        raise ValueError(f"config value invalid: stopModeText={payload['stopModeText']}")
+    if payload["listModeText"] not in {"下载未完成", "下载全部", "重新监测URL"}:
+        raise ValueError(f"config value invalid: listModeText={payload['listModeText']}")
+
 
 def normalize_config_dict(data):
     defaults = default_config()
@@ -167,7 +222,7 @@ def normalize_config_dict(data):
     depth = _normalize_depth_value(merged.get("depth"), defaults["depth"])
     depth = _to_int(depth, defaults["depth"], 1, 3)
     monitor_try_enabled = _to_bool(merged.get("monitorTryEnabled"), defaults["monitorTryEnabled"])
-    monitor_tries = _to_int(merged.get("monitorTries"), defaults["monitorTries"], 1, 9)
+    monitor_tries = _to_int(merged.get("monitorTries"), defaults["monitorTries"], 1, 5)
     monitor_interaction = _to_bool(merged.get("monitorInteraction"), defaults["monitorInteraction"])
     monitor_headless = _to_bool(merged.get("monitorHeadless"), defaults["monitorHeadless"])
     monitor_rules_path = _to_text(merged.get("monitorRulesPath"), defaults["monitorRulesPath"])
@@ -216,14 +271,15 @@ def normalize_config_dict(data):
 
 
 def ensure_normalized_config(config):
+    current = config.data
     try:
-        current = config.data
         _validate_config_payload(current)
         normalized = normalize_config_dict(current)
     except Exception as exc:
         print(f"invalid config, reset to default: {exc}")
         try:
-            broken_path = _backup_broken_config(getattr(config, "filePath", ""))
+            should_backup = not (isinstance(current, dict) and len(current) == 0)
+            broken_path = _backup_broken_config(getattr(config, "filePath", "")) if should_backup else ""
             if broken_path:
                 print(f"config backup: {broken_path}")
         except Exception as backup_exc:
@@ -295,7 +351,7 @@ class Worker(QThread):
         self.monitorConfig = {
             "headless": _to_bool(config.get("monitorHeadless", True), True),
             "rules_path": _to_text(config.get("monitorRulesPath", "")),
-            "tries": _to_int(config.get("monitorTries", 3), 3, 1, 9),
+            "tries": _to_int(config.get("monitorTries", 3), 3, 1, 5),
             "interaction_enabled": _to_bool(config.get("monitorInteraction", True), True),
         }
         self.monitorTryEnabled = _to_bool(config.get("monitorTryEnabled", True), True)
