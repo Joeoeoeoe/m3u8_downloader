@@ -2,8 +2,8 @@
 
 ## 1. 文件加载与异常处理
 
-- 默认规则文件：`monitor.rules.json`
-- 默认位置：与 `MonitorM3U8.py` 同目录
+- 默认规则文件名：`monitor.rules.json`
+- 默认路径：`config/monitor.rules.json`
 - 可通过 `config/config.json` 的 `monitorRulesPath` 指定路径
 
 路径解析规则：
@@ -29,7 +29,7 @@
 {
   "chains": {},
   "global": {
-    "actions": [], // type + when + args for an act
+    "actions": [],
     "chains": {}
   },
   "sites": []
@@ -258,12 +258,30 @@
 - `frame` 或 `frames`：仅 iframe
 - `all` 或 `page_and_frames`：主页面 + 所有 iframe
 
+示例：
+
+- 页面主文档上的按钮：用 `page`
+- 播放器在 iframe 中：用 `frames`
+- 不确定播放器在主页面还是 iframe：用 `all`
+
 ### 11.2 `selector` 与 `selectors`
 
 - `selector`：单个选择器字符串
 - `selectors`：选择器数组
 - 两者可同时出现，程序会合并后使用
 - `$player`：播放器选择器宏，展开为内置常见播放器选择器集合
+
+支持标准 CSS 选择器（标签、类、ID、属性选择器都可以）：
+
+- 标签：`video`
+- 类：`.play-btn`
+- ID：`#player`
+- 组合：`div#player.abc`
+- 属性：`div[id='123'].abc`
+
+注意：
+
+- 若 ID 以数字开头，建议使用属性写法，如 `div[id='123']`（比 `#\\31 23` 更直观）
 
 ## 12. Action 字段明细与示例
 
@@ -272,6 +290,10 @@
 `args` 字段：
 
 - `name`：链名（必填，字符串）
+
+说明：
+
+- `args.name` 不是注释字段，而是链引用键；运行时会按这个值展开并执行对应链
 
 ```json
 { "type": "chain", "when": "=1", "args": { "name": "first_pass" } }
@@ -298,6 +320,23 @@
 - `timeout_ms`：`100~60000`
 - `poll_ms`：`50~1000`，轮询间隔毫秒
 
+`state` 语义：
+
+- `attached`：元素存在于 DOM 中（不要求可见）
+- `detached`：元素不在 DOM 中
+- `visible`：元素存在且可见
+- `hidden`：元素不存在，或存在但不可见
+
+`match` 语义（针对传入的多个 `selector(s)`）：
+
+- `any`：任一选择器满足 `state` 即算成功
+- `all`：所有选择器都满足 `state` 才算成功
+
+`poll_ms` 语义：
+
+- 每隔多少毫秒重查一次条件
+- 值越小响应越快，但轮询更频繁
+
 ```json
 {
   "type": "wait_for_selector",
@@ -321,6 +360,10 @@
 - `timeout_ms`：`100~120000`
 - `poll_ms`：`50~1000`
 - `group_actions`：并行子动作数组（仅允许 `wait` / `wait_for_selector` / `wait_group`）
+
+`poll_ms` 语义：
+
+- 每轮并行条件检查之间的间隔毫秒数
 
 ```json
 {
@@ -513,6 +556,11 @@
 - `y`：当 `deltas` 不存在时的单次 Y 偏移
 - `x`：滚轮 X 偏移
 - `wait_after_scroll_ms`：每次滚动后等待，`0~30000`
+
+滚动方向：
+
+- 正数：向下滚动
+- 负数：向上回滚
 
 ```json
 {

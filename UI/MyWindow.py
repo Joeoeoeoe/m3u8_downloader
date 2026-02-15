@@ -52,7 +52,7 @@ def default_config():
         "proxyPassword": "",
         "maxParallel": 100,
         "monitorHeadless": True,
-        "monitorRulesPath": "monitor.rules.json",
+        "monitorRulesPath": "config/monitor.rules.json",
     }
 
 

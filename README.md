@@ -52,7 +52,7 @@
 | :-- | :-- | :-- |
 | 递归探测层数 | 控制递归层数（1-6，1表示仅探测输入URL） | 开启，2 |
 | 探测尝试次数 | 每个 URL 的嗅探尝试次数 | 开启，3 |
-| 浏览器交互 | 是否执行 `monitor.rules.json` 动作链 | 开启 |
+| 浏览器交互 | 是否执行 `config/monitor.rules.json` 动作链 | 开启 |
 | 无界面探测 | 监测阶段是否隐藏浏览器窗口 | 开启 |
 | 下载方式 | 不下载 / 下载首个 / 下载前5个 / 下载所有 | 下载首个 |
 | 最大并行数量 | 分片下载线程池上限（1-999） | 100 |
@@ -62,7 +62,7 @@
 
 ### 高级监测规则（手动配置）
 
-- 在 `config/config.json` 设置 `monitorRulesPath`，默认值：`"monitorRulesPath": "monitor.rules.json"`。
+- 在 `config/config.json` 设置 `monitorRulesPath`，默认值：`"monitorRulesPath": "config/monitor.rules.json"`。
 - 规则支持按域名/URL 匹配，并配置点击、滚动、键盘等动作。
 - 推荐统一写法：每个动作使用 `type + when + args`（详见 `docs/MONITOR_RULES.md`）。
 - 详细字段说明见：`docs/MONITOR_RULES.md`

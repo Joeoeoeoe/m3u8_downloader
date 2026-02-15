@@ -1,33 +1,63 @@
 {
     "chains": {
-        "first_pass": [
+        "dismiss_overlays": [
             {
-                "type": "play_media",
-                "when": "=1",
+                "type": "click",
                 "args": {
-                    "target": "page"
+                    "selectors": [
+                        ".close",
+                        ".btn-close",
+                        ".popup-close",
+                        ".modal-close",
+                        ".layui-layer-close",
+                        "[class*='close' i]",
+                        "[aria-label*='close' i]",
+                        "[data-dismiss='modal']"
+                    ],
+                    "target": "all",
+                    "repeat": 2,
+                    "wait_ms": 250,
+                    "max_per_selector": 3,
+                    "visible_timeout_ms": 500,
+                    "click_timeout_ms": 1200,
+                    "wait_after_click_ms": 120
                 }
             },
             {
+                "type": "press",
+                "args": {
+                    "key": "Escape"
+                }
+            },
+            {
+                "type": "wait",
+                "args": {
+                    "ms": 220
+                }
+            }
+        ],
+        "probe_player_ready": [
+            {
                 "type": "wait_group",
-                "when": "=1",
                 "args": {
                     "mode": "any",
-                    "timeout_ms": 6000,
-                    "poll_ms": 150,
+                    "timeout_ms": 4500,
+                    "poll_ms": 120,
                     "group_actions": [
                         {
                             "type": "wait_for_selector",
                             "args": {
                                 "selectors": [
+                                    "video",
+                                    "audio",
                                     "$player",
-                                    "video"
+                                    "iframe[src*='player' i]"
                                 ],
-                                "state": "visible",
+                                "state": "attached",
                                 "match": "any",
                                 "target": "all",
-                                "timeout_ms": 5500,
-                                "poll_ms": 150
+                                "timeout_ms": 4200,
+                                "poll_ms": 120
                             }
                         },
                         {
@@ -40,70 +70,140 @@
                 }
             },
             {
+                "type": "play_media",
+                "args": {
+                    "target": "all"
+                }
+            },
+            {
                 "type": "click",
-                "when": "=1",
                 "args": {
                     "selectors": [
                         "$player",
-                        ".play-btn"
+                        "video",
+                        ".play",
+                        ".play-btn",
+                        "button[class*='play' i]"
                     ],
                     "target": "all",
                     "repeat": 1,
-                    "wait_ms": 1200,
+                    "wait_ms": 900,
                     "max_per_selector": 2,
-                    "visible_timeout_ms": 800,
+                    "visible_timeout_ms": 700,
                     "click_timeout_ms": 1600,
-                    "wait_after_click_ms": 300
+                    "wait_after_click_ms": 200
+                }
+            },
+            {
+                "type": "wait",
+                "args": {
+                    "ms": 700
                 }
             }
         ],
-        "retry_pass": [
+        "monitor_first_pass": [
+            {
+                "type": "chain",
+                "args": {
+                    "name": "dismiss_overlays"
+                }
+            },
+            {
+                "type": "chain",
+                "args": {
+                    "name": "probe_player_ready"
+                }
+            },
+            {
+                "type": "scroll",
+                "args": {
+                    "deltas": [
+                        600,
+                        -260,
+                        900
+                    ],
+                    "wait_after_scroll_ms": 500
+                }
+            },
+            {
+                "type": "wait",
+                "args": {
+                    "ms": 650
+                }
+            }
+        ],
+        "monitor_retry_pass": [
+            {
+                "type": "chain",
+                "args": {
+                    "name": "dismiss_overlays"
+                }
+            },
             {
                 "type": "wait_for_selector",
-                "when": ">=2",
                 "args": {
                     "selectors": [
-                        "$player"
+                        "video",
+                        ".player",
+                        "$player",
+                        "iframe"
                     ],
-                    "state": "visible",
+                    "state": "attached",
                     "match": "any",
                     "target": "all",
-                    "timeout_ms": 4000,
-                    "poll_ms": 150
+                    "timeout_ms": 5000,
+                    "poll_ms": 120
+                }
+            },
+            {
+                "type": "click",
+                "args": {
+                    "selectors": [
+                        "$player",
+                        "video",
+                        ".play",
+                        ".play-btn",
+                        "button[class*='play' i]"
+                    ],
+                    "target": "all",
+                    "repeat": 2,
+                    "wait_ms": 1000,
+                    "max_per_selector": 2,
+                    "visible_timeout_ms": 700,
+                    "click_timeout_ms": 1800,
+                    "wait_after_click_ms": 200
                 }
             },
             {
                 "type": "hover",
-                "when": ">=2",
                 "args": {
                     "selectors": [
-                        ".player-wrap",
-                        ".video-container"
+                        "video",
+                        ".player",
+                        ".video-wrap"
                     ],
                     "target": "all",
                     "repeat": 1,
                     "max_per_selector": 1,
                     "visible_timeout_ms": 700,
                     "hover_timeout_ms": 1200,
-                    "wait_ms": 500
+                    "wait_ms": 350
                 }
             },
             {
                 "type": "scroll",
-                "when": ">=2",
                 "args": {
                     "deltas": [
-                        240,
-                        900,
-                        1500
+                        1200,
+                        -500,
+                        1600,
+                        -900
                     ],
-                    "x": 0,
-                    "wait_after_scroll_ms": 800
+                    "wait_after_scroll_ms": 600
                 }
             },
             {
                 "type": "mouse_click",
-                "when": ">=2",
                 "args": {
                     "position": {
                         "x": "center",
@@ -116,67 +216,14 @@
             },
             {
                 "type": "press",
-                "when": ">=2",
                 "args": {
                     "key": "Space"
                 }
             },
             {
                 "type": "wait",
-                "when": ">=2",
                 "args": {
-                    "ms": 1000
-                }
-            }
-        ],
-        "search_then_play": [
-            {
-                "type": "fill",
-                "when": "=1",
-                "args": {
-                    "selector": "input[name='wd']",
-                    "target": "page",
-                    "value": "m3u8",
-                    "index": 0,
-                    "fill_timeout_ms": 3000,
-                    "visible_timeout_ms": 800,
-                    "require_visible": true,
-                    "submit_key": "Enter"
-                }
-            },
-            {
-                "type": "wait_for_load_state",
-                "when": "=1",
-                "args": {
-                    "state": "networkidle",
-                    "timeout_ms": 12000
-                }
-            },
-            {
-                "type": "wait",
-                "when": "=1",
-                "args": {
-                    "ms": 800
-                }
-            }
-        ],
-        "force_navigate": [
-            {
-                "type": "goto",
-                "when": "=1",
-                "args": {
-                    "url": "/play/12345.html",
-                    "wait_until": "domcontentloaded",
-                    "timeout_ms": 18000
-                }
-            },
-            {
-                "type": "evaluate",
-                "when": "=1",
-                "args": {
-                    "script": "(els) => els.forEach(el => el.click())",
-                    "selector": ".play-btn",
-                    "target": "all"
+                    "ms": 1200
                 }
             }
         ]
@@ -187,150 +234,24 @@
                 "type": "log",
                 "when": "=1",
                 "args": {
-                    "message": "global first attempt started"
+                    "message": "monitor first attempt strategy started"
                 }
             },
             {
                 "type": "chain",
                 "when": "=1",
                 "args": {
-                    "name": "first_pass"
+                    "name": "monitor_first_pass"
                 }
             },
             {
                 "type": "chain",
                 "when": ">=2",
                 "args": {
-                    "name": "retry_pass"
+                    "name": "monitor_retry_pass"
                 }
             }
-        ],
-        "chains": {}
+        ]
     },
-    "sites": [
-        {
-            "name": "match-by-host-only",
-            "enabled": true,
-            "match": {
-                "host": [
-                    "example.com",
-                    "*.example.com"
-                ]
-            },
-            "actions": [
-                {
-                    "type": "chain",
-                    "when": "=1",
-                    "args": {
-                        "name": "search_then_play"
-                    }
-                }
-            ],
-            "chains": {}
-        },
-        {
-            "name": "match-by-contains-only",
-            "enabled": true,
-            "match": {
-                "url_contains": [
-                    "/vod/",
-                    "/play/"
-                ]
-            },
-            "actions": [
-                {
-                    "type": "chain",
-                    "when": ">=2",
-                    "args": {
-                        "name": "retry_pass"
-                    }
-                }
-            ],
-            "chains": {}
-        },
-        {
-            "name": "match-by-regex-only",
-            "enabled": true,
-            "match": {
-                "url_regex": "^https?://[^/]+/(play|vod)/\\d+\\.html$"
-            },
-            "actions": [
-                {
-                    "type": "chain",
-                    "when": "=1",
-                    "args": {
-                        "name": "force_navigate"
-                    }
-                }
-            ],
-            "chains": {}
-        },
-        {
-            "name": "mixed-match-or-logic",
-            "enabled": true,
-            "match": {
-                "host": [
-                    "*.video.local"
-                ],
-                "url_contains": [
-                    "/watch/"
-                ],
-                "url_regex": "player"
-            },
-            "actions": [
-                {
-                    "type": "wait_group",
-                    "when": [
-                        ">=2",
-                        "=last"
-                    ],
-                    "args": {
-                        "mode": "all",
-                        "timeout_ms": 7000,
-                        "poll_ms": 120,
-                        "group_actions": [
-                            {
-                                "type": "wait_for_selector",
-                                "args": {
-                                    "selectors": [
-                                        ".player",
-                                        "video"
-                                    ],
-                                    "state": "visible",
-                                    "match": "any",
-                                    "target": "all",
-                                    "timeout_ms": 6500,
-                                    "poll_ms": 150
-                                }
-                            },
-                            {
-                                "type": "wait",
-                                "args": {
-                                    "ms": 1000
-                                }
-                            }
-                        ]
-                    }
-                },
-                {
-                    "type": "click",
-                    "when": ">=2",
-                    "args": {
-                        "selectors": [
-                            "$player",
-                            ".start"
-                        ],
-                        "target": "all",
-                        "repeat": 2,
-                        "wait_ms": 900,
-                        "max_per_selector": 2,
-                        "visible_timeout_ms": 800,
-                        "click_timeout_ms": 1600,
-                        "wait_after_click_ms": 300
-                    }
-                }
-            ],
-            "chains": {}
-        }
-    ]
+    "sites": []
 }

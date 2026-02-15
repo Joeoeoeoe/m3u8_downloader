@@ -31,6 +31,7 @@ class MonitorM3U8:
     ]
     DEFAULT_RULES_PATH = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
+        "config",
         "monitor.rules.json",
     )
 
@@ -218,42 +219,79 @@ class MonitorM3U8:
     def _builtin_default_rules(cls):
         return {
             "chains": {
-                "monitor_first_pass": [
+                "dismiss_overlays": [
                     {
-                        "type": "play_media",
+                        "type": "click",
                         "args": {
-                            "target": "page",
+                            "selectors": [
+                                ".close",
+                                ".btn-close",
+                                ".popup-close",
+                                ".modal-close",
+                                ".layui-layer-close",
+                                "[class*='close' i]",
+                                "[aria-label*='close' i]",
+                                "[data-dismiss='modal']",
+                            ],
+                            "target": "all",
+                            "repeat": 2,
+                            "wait_ms": 250,
+                            "max_per_selector": 3,
+                            "visible_timeout_ms": 500,
+                            "click_timeout_ms": 1200,
+                            "wait_after_click_ms": 120,
+                        },
+                    },
+                    {
+                        "type": "press",
+                        "args": {
+                            "key": "Escape",
                         },
                     },
                     {
                         "type": "wait",
                         "args": {
-                            "ms": 1400,
-                        },
-                    },
-                    {
-                        "type": "click",
-                        "args": {
-                            "selectors": [
-                                "$player",
-                            ],
-                            "repeat": 1,
-                            "wait_ms": 1600,
+                            "ms": 220,
                         },
                     },
                 ],
-                "monitor_retry_pass": [
+                "probe_player_ready": [
                     {
-                        "type": "wait_for_selector",
+                        "type": "wait_group",
                         "args": {
-                            "selectors": [
-                                "$player",
+                            "mode": "any",
+                            "timeout_ms": 4500,
+                            "poll_ms": 120,
+                            "group_actions": [
+                                {
+                                    "type": "wait_for_selector",
+                                    "args": {
+                                        "selectors": [
+                                            "video",
+                                            "audio",
+                                            "$player",
+                                            "iframe[src*='player' i]",
+                                        ],
+                                        "state": "attached",
+                                        "match": "any",
+                                        "target": "all",
+                                        "timeout_ms": 4200,
+                                        "poll_ms": 120,
+                                    },
+                                },
+                                {
+                                    "type": "wait",
+                                    "args": {
+                                        "ms": 1200,
+                                    },
+                                },
                             ],
-                            "state": "visible",
-                            "match": "any",
+                        },
+                    },
+                    {
+                        "type": "play_media",
+                        "args": {
                             "target": "all",
-                            "timeout_ms": 4000,
-                            "poll_ms": 150,
                         },
                     },
                     {
@@ -261,17 +299,117 @@ class MonitorM3U8:
                         "args": {
                             "selectors": [
                                 "$player",
+                                "video",
+                                ".play",
+                                ".play-btn",
+                                "button[class*='play' i]",
                             ],
                             "target": "all",
-                            "repeat": 2,
-                            "wait_ms": 1200,
+                            "repeat": 1,
+                            "wait_ms": 900,
+                            "max_per_selector": 2,
+                            "visible_timeout_ms": 700,
+                            "click_timeout_ms": 1600,
+                            "wait_after_click_ms": 200,
+                        },
+                    },
+                    {
+                        "type": "wait",
+                        "args": {
+                            "ms": 700,
+                        },
+                    },
+                ],
+                "monitor_first_pass": [
+                    {
+                        "type": "chain",
+                        "args": {
+                            "name": "dismiss_overlays",
+                        },
+                    },
+                    {
+                        "type": "chain",
+                        "args": {
+                            "name": "probe_player_ready",
                         },
                     },
                     {
                         "type": "scroll",
                         "args": {
-                            "deltas": [240, 800, 1500],
-                            "wait_after_scroll_ms": 900,
+                            "deltas": [600, -260, 900],
+                            "wait_after_scroll_ms": 500,
+                        },
+                    },
+                    {
+                        "type": "wait",
+                        "args": {
+                            "ms": 650,
+                        },
+                    },
+                ],
+                "monitor_retry_pass": [
+                    {
+                        "type": "chain",
+                        "args": {
+                            "name": "dismiss_overlays",
+                        },
+                    },
+                    {
+                        "type": "wait_for_selector",
+                        "args": {
+                            "selectors": [
+                                "video",
+                                ".player",
+                                "$player",
+                                "iframe",
+                            ],
+                            "state": "attached",
+                            "match": "any",
+                            "target": "all",
+                            "timeout_ms": 5000,
+                            "poll_ms": 120,
+                        },
+                    },
+                    {
+                        "type": "click",
+                        "args": {
+                            "selectors": [
+                                "$player",
+                                "video",
+                                ".play",
+                                ".play-btn",
+                                "button[class*='play' i]",
+                            ],
+                            "target": "all",
+                            "repeat": 2,
+                            "wait_ms": 1000,
+                            "max_per_selector": 2,
+                            "visible_timeout_ms": 700,
+                            "click_timeout_ms": 1800,
+                            "wait_after_click_ms": 200,
+                        },
+                    },
+                    {
+                        "type": "hover",
+                        "args": {
+                            "selectors": [
+                                "video",
+                                ".player",
+                                ".video-wrap",
+                            ],
+                            "target": "all",
+                            "repeat": 1,
+                            "max_per_selector": 1,
+                            "visible_timeout_ms": 700,
+                            "hover_timeout_ms": 1200,
+                            "wait_ms": 350,
+                        },
+                    },
+                    {
+                        "type": "scroll",
+                        "args": {
+                            "deltas": [1200, -500, 1600, -900],
+                            "wait_after_scroll_ms": 600,
                         },
                     },
                     {
@@ -280,7 +418,10 @@ class MonitorM3U8:
                             "position": {
                                 "x": "center",
                                 "y": "center",
-                            }
+                            },
+                            "button": "left",
+                            "click_count": 1,
+                            "delay_ms": 0,
                         },
                     },
                     {
@@ -289,11 +430,23 @@ class MonitorM3U8:
                             "key": "Space",
                         },
                     },
-                    {"type": "wait", "args": {"ms": 1200}},
+                    {
+                        "type": "wait",
+                        "args": {
+                            "ms": 1200,
+                        },
+                    },
                 ],
             },
             "global": {
                 "actions": [
+                    {
+                        "type": "log",
+                        "when": "=1",
+                        "args": {
+                            "message": "monitor first attempt strategy started",
+                        },
+                    },
                     {
                         "type": "chain",
                         "args": {
