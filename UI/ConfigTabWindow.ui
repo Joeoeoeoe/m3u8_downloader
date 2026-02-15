@@ -493,7 +493,7 @@
              </font>
             </property>
             <property name="text">
-             <string>递归搜索深度</string>
+             <string>递归探测层数</string>
             </property>
             <property name="checked">
              <bool>true</bool>
@@ -515,7 +515,7 @@
              <number>1</number>
             </property>
             <property name="maximum">
-             <number>3</number>
+             <number>6</number>
             </property>
             <property name="value">
              <number>2</number>
@@ -715,10 +715,10 @@
              </font>
             </property>
             <property name="currentText">
-             <string>不下载</string>
+             <string>下载首个</string>
             </property>
             <property name="currentIndex">
-             <number>0</number>
+             <number>1</number>
             </property>
             <item>
              <property name="text">

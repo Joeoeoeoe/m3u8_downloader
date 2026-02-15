@@ -2,17 +2,13 @@
     "chains": {
         "monitor_first_pass": [
             {
-                "type": "extract",
-                "args": {}
-            },
-            {
                 "type": "play_media",
                 "args": {
                     "target": "page"
                 }
             },
             {
-                "type": "wait_for_candidates",
+                "type": "wait",
                 "args": {
                     "ms": 1400
                 }
@@ -24,28 +20,33 @@
                         "$player"
                     ],
                     "repeat": 1,
-                    "wait_for_candidates_ms": 1800
+                    "wait_ms": 1600
                 }
-            },
-            {
-                "type": "recover",
-                "args": {}
-            },
-            {
-                "type": "extract",
-                "args": {}
             }
         ],
         "monitor_retry_pass": [
             {
-                "type": "click",
+                "type": "wait_for_selector",
                 "args": {
-                    "target": "all",
                     "selectors": [
                         "$player"
                     ],
+                    "state": "visible",
+                    "match": "any",
+                    "target": "all",
+                    "timeout_ms": 4000,
+                    "poll_ms": 150
+                }
+            },
+            {
+                "type": "click",
+                "args": {
+                    "selectors": [
+                        "$player"
+                    ],
+                    "target": "all",
                     "repeat": 2,
-                    "wait_for_candidates_ms": 1500
+                    "wait_ms": 1200
                 }
             },
             {
@@ -56,7 +57,7 @@
                         800,
                         1500
                     ],
-                    "wait_for_candidates_ms": 1200
+                    "wait_after_scroll_ms": 900
                 }
             },
             {
@@ -76,18 +77,10 @@
                 }
             },
             {
-                "type": "wait_for_candidates",
+                "type": "wait",
                 "args": {
                     "ms": 1200
                 }
-            },
-            {
-                "type": "recover",
-                "args": {}
-            },
-            {
-                "type": "extract",
-                "args": {}
             }
         ]
     },
@@ -95,20 +88,19 @@
         "actions": [
             {
                 "type": "chain",
-                "when": "first",
+                "when": "=1",
                 "args": {
                     "name": "monitor_first_pass"
                 }
             },
             {
                 "type": "chain",
-                "when": "retry",
+                "when": ">=2",
                 "args": {
                     "name": "monitor_retry_pass"
                 }
             }
         ]
     },
-    "sites": [
-    ]
+    "sites": []
 }

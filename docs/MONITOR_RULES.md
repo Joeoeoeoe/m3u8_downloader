@@ -1,381 +1,592 @@
-# monitor.rules.json 配置说明（可读版）
+# monitor.rules.json 配置说明
 
-这份文档只讲“如何写出可用、可维护的规则”，不需要翻源码。
+## 1. 文件加载与异常处理
 
-## 0. 快速开始（最小可用）
+- 默认规则文件：`monitor.rules.json`
+- 默认位置：与 `MonitorM3U8.py` 同目录
+- 可通过 `config/config.json` 的 `monitorRulesPath` 指定路径
 
-```json
-{
-    "global": {
-        "actions": [
-            { "type": "click", "args": { "selectors": ["$player"], "repeat": 2 } },
-            { "type": "wait_for_candidates", "args": { "ms": 1600 } },
-            { "type": "extract", "args": {} }
-        ]
-    }
-}
-```
+路径解析规则：
 
-## 1. 文件位置与加载
+- 绝对路径：直接使用
+- 仅文件名：相对 `MonitorM3U8.py` 所在目录
+- 相对路径：相对当前工作目录
 
-### 1.1 默认位置
+异常处理规则（严格模式）：
 
-- 运行文件：`monitor.rules.json`
-- 默认路径：与 `MonitorM3U8.py` 同目录（项目根目录）
+- 文件不存在：自动创建默认规则文件
+- JSON 结构不合法或字段不被支持：原文件重命名为 `*.broken-YYYYMMDD-HHMMSS`，随后重建默认规则
 
-### 1.2 在主配置中指定
+## 2. 顶层结构（固定）
 
-```json
-{ "monitorRulesPath": "configs/monitor.rules.json" }
-```
+根对象必须且只允许包含以下 3 个字段：
 
-当前版本仅支持 `monitorRulesPath`（配置文件为 `config/config.json`，严格字段校验）。
-
-路径规则：
-
-- 绝对路径：直接用
-- 仅文件名：按 `MonitorM3U8.py` 同目录
-- 相对路径：按程序当前工作目录
-
-### 1.3 文件损坏时
-
-- 不存在：自动创建默认 `monitor.rules.json`
-- 解析失败：重命名为 `*.broken-时间戳`，再重建默认文件
-
-示例（自动修复后文件名）：
-
-```
-monitor.rules.json.broken-20260215-103012
-```
-
-补充：
-
-- `config/config.json` 字段不匹配时，也会备份成 `*.broken-时间戳` 并重建默认配置。
-
-## 2. 术语与执行模型（先看这个）
-
-### 2.1 交互与尝试
-
-一次“监测”会有多次尝试（attempt）。每次尝试会打开浏览器页面并抓取候选；只有开启交互时才会执行动作链。
-
-- `attempt=1`：首次交互
-- `attempt>=2`：重试交互
-- `attempt=last`：最后一次尝试
-
-### 2.2 动作执行顺序
-
-每次交互会按如下顺序执行动作：
-
-1. `global.actions`
-2. 命中的 `sites[i].actions`（按 `sites` 顺序追加）
-
-同一个 URL 可以命中多个站点规则，都会执行。
-
-示例（先全局，再站点）：
+- `chains`：全局动作链定义
+- `global`：全局动作入口
+- `sites`：站点规则列表
 
 ```json
 {
-    "global": { "actions": [ { "type": "log", "args": { "message": "global" } } ] },
-    "sites": [
-        {
-            "name": "site-a",
-            "match": { "host": ["a.com"] },
-            "actions": [ { "type": "log", "args": { "message": "site-a" } } ]
-        }
-    ]
+  "chains": {},
+  "global": {
+    "actions": [], // type + when + args for an act
+    "chains": {}
+  },
+  "sites": []
 }
 ```
 
-### 2.3 交互开关与尝试次数（独立于 depth）
+## 3. 执行模型
 
-`monitor.rules.json` 的动作链是否执行，由 `monitorInteraction` 控制，不再和 `depth` 绑定。
+### 3.1 串行执行
 
-- `monitorInteraction=true`：执行动作链
-- `monitorInteraction=false`：不执行动作链（只做基础抓取）
+- `global.actions` 是顺序执行
+- `sites[i].actions` 也是顺序执行
+- 多个站点规则命中时：按 `sites` 中出现顺序追加到全局动作后执行
 
-尝试次数由 `monitorTries` 控制（每个 URL 的嗅探尝试次数，范围 `1~5`）。
+### 3.2 并行等待
 
-## 3. depth 简化写法（可选）
+- 并行语义由 `wait_group` 实现
+- `wait_group.args.group_actions` 是并行等待条件集合
+- `mode=any`：任一子条件满足即结束
+- `mode=all`：全部子条件满足才结束
 
-`config/config.json` 里的 `depth` 支持数字或语义别名：
+### 3.3 “串行会不会阻塞后续识别”
 
-- `off / none / disabled` → `0`
-- `lite / light / basic / simple` → `1`
-- `standard / normal / default` → `2`（推荐）
-- `deep / full / aggressive` → `3`
+不会因为“元素已经出现过”而永久阻塞。  
+原因：`wait_for_selector` 每次都会先检查当前页面状态；如果条件已经满足，会立即返回，不会一直等待到超时。
+
+## 4. `when` 表达式
+
+`when` 控制动作在第几次探测尝试中执行。  
+表达式是“可计算条件”，不是固定标签枚举。
+
+支持值：
+
+- 数值：`1`、`2`（等价于 `=1`、`=2`）
+- 字符串表达式：`=1`、`==1`、`>1`、`>=2`、`<4`、`<=3`、`=last`
+- 数组（OR 关系）：`["=1", "=last"]`
+
+说明：
+
+- `last` 表示本次 URL 的最后一次尝试（由 `monitorTries` 决定）
+- 未写 `when`：默认每次尝试都执行
 
 示例：
 
 ```json
-{ "depth": "standard" }
+{ "type": "chain", "when": "=1", "args": { "name": "first_pass" } }
 ```
 
-注意：`depth` 只表达递归相关深度；交互行为由 `monitorInteraction` 单独控制。
+```json
+{ "type": "chain", "when": [">=2", "=last"], "args": { "name": "retry_pass" } }
+```
 
-## 4. 总体结构
+## 5. `chains`
+
+`chains` 是对象：键为链名，值为动作数组。
 
 ```json
 {
-    "chains": { "chain_name": [ { "type": "extract", "args": {} } ] },
-    "global": { "actions": [], "chains": {} },
-    "sites": [
-        {
-            "name": "example-site",
-            "enabled": true,
-            "match": { "host": ["example.com"], "url_contains": ["/play/"], "url_regex": "" },
-            "actions": [],
-            "chains": {}
-        }
+  "chains": {
+    "first_pass": [
+      { "type": "play_media", "args": { "target": "page" } },
+      { "type": "wait", "args": { "ms": 1200 } }
     ]
+  }
 }
 ```
 
-字段含义：
+链引用方式：
 
-- `chains`：全局可复用动作链
-- `global`：全局动作
-- `sites`：站点规则（按 URL 匹配追加动作）
-
-兼容说明：
-
-- 若顶层存在 `actions/chains` 且未写 `global.actions/global.chains`，程序会把顶层值并入 `global`。
-
-## 5. `when`：更丰富的交互阶段
-
-### 5.1 常用值
-
-- `all`：每次交互都执行（默认）
-- `*`：等价 `all`
-- `first`：仅首次交互
-- `retry`：仅重试交互（attempt>=2）
-- `last`：仅最后一次尝试
-- `none/never/skip`：始终不执行（可用于临时禁用某个 action）
-
-### 5.2 语义别名
-
-- `init/startup/start/initial` → 等价 `first`
-- `retries/again` → 等价 `retry`
-- `final/end` → 等价 `last`
-
-### 5.3 条件表达式（推荐）
-
-你可以写成条件：
-
-- `attempt=1`
-- `attempt>=2`
-- `attempt=last`
-- `attempt<=2`
-
-示例：
+- 使用 `type=chain`
+- `args.name` 指向链名
 
 ```json
-{ "type": "click", "when": "attempt>=2", "args": { "selectors": ["$player"] } }
+{ "type": "chain", "args": { "name": "first_pass" } }
 ```
 
-未知值会按 `all` 处理，不会报错。
+## 6. `global`
 
-## 6. Action 统一格式
+`global` 字段：
 
-所有动作建议写成：
-
-```json
-{ "type": "click", "when": "retry", "args": { "selectors": ["$player"] } }
-```
-
-兼容说明：旧写法把参数放在顶层仍可用，但建议统一放到 `args`。
-
-## 7. Chain（动作链）
-
-### 7.1 定义
+- `actions`：全局动作数组（必填，可为空数组）
+- `chains`：全局局部链定义（可选覆盖，与根 `chains` 合并）
 
 ```json
 {
-    "chains": {
-        "close_popup": [
-            { "type": "click", "args": { "selectors": [".close"], "repeat": 2 } },
-            { "type": "wait", "args": { "ms": 200 } }
-        ]
-    }
+  "global": {
+    "actions": [
+      { "type": "chain", "when": "=1", "args": { "name": "first_pass" } },
+      { "type": "chain", "when": ">=2", "args": { "name": "retry_pass" } }
+    ],
+    "chains": {}
+  }
 }
 ```
 
-### 7.2 调用
+## 7. `sites`
 
-```json
-{ "type": "chain", "when": "first", "args": { "name": "close_popup" } }
-```
+`sites` 是数组。每项字段：
 
-### 7.3 规则
-
-- 链可嵌套，最大递归深度 10
-- 循环引用会跳过并打印日志
-- `chain` 自己写了 `when` 会覆盖链内未写 `when` 的动作
-- 链作用域覆盖顺序：顶层 `chains` < `global.chains` < `sites[i].chains`
-
-## 8. 站点匹配（`sites[i].match`）
+- `name`：规则名称，字符串
+- `enabled`：是否启用，布尔值
+- `match`：匹配条件对象
+- `actions`：命中后附加动作数组
+- `chains`：站点私有链定义
 
 ```json
 {
-    "match": {
+  "sites": [
+    {
+      "name": "example-site",
+      "enabled": true,
+      "match": {
         "host": ["example.com", "*.example.com"],
-        "url_contains": ["/play/", "/vod/"],
-        "url_regex": "https?://.*"
+        "url_contains": ["/play/"],
+        "url_regex": "^https?://[^/]+/play/\\d+\\.html$"
+      },
+      "actions": [
+        { "type": "click", "when": ">=2", "args": { "selectors": ["$player"], "target": "all" } }
+      ],
+      "chains": {}
     }
+  ]
 }
 ```
 
-逻辑：`host`、`url_contains`、`url_regex` 之间是 AND；每一类数组内部是 OR。
+## 8. `match` 规则
 
-补充：
+`match` 子字段全部可选，三类条件之间是 **OR** 关系：
 
-- `host/url_contains` 按小写比较；
-- `url_regex` 使用 `re.IGNORECASE`；
-- `url_regex` 非法时，该 site 规则直接不匹配。
+- `host`：字符串或数组，通配匹配（`fnmatch`）
+- `url_contains`：字符串或数组，URL 子串匹配（忽略大小写）
+- `url_regex`：字符串，Python `re.search` 正则匹配（忽略大小写）
 
-## 9. 通用参数约定
+判定规则：
 
-### 9.1 `target`
+- 只写了部分字段：只对已写字段做判定
+- 任一已写字段命中即匹配成功
+- 三类都没写：视为匹配所有 URL
 
-- `page`：仅主页面（默认）
-- `frame/frames`：仅子 frame
-- `all/page_and_frames`：主页面 + 子 frame
-
-示例：
+示例 1（只按 host）：
 
 ```json
-{ "type": "click", "args": { "target": "all", "selectors": [".btn"] } }
+{ "match": { "host": "*.example.com" } }
 ```
 
-### 9.2 选择器字段
-
-`selectors`（数组）或 `selector`（单个）都可以，程序会合并去重。
-
-示例：
+示例 2（只按 contains）：
 
 ```json
-{ "type": "hover", "args": { "selector": ".player" } }
+{ "match": { "url_contains": ["/vod/", "/play/"] } }
 ```
 
-### 9.3 `$player` 宏
-
-`$player` 会展开为内置播放器相关选择器集合（`video`、常见播放按钮等）。
-
-示例：
+示例 3（只按 regex）：
 
 ```json
-{ "type": "click", "args": { "selectors": ["$player"] } }
+{ "match": { "url_regex": "^https?://[^/]+/(play|vod)/\\d+\\.html$" } }
 ```
 
-## 10. Action 类型与示例
+## 9. `url_regex` 语法
 
-下文给每个动作的最小示例（默认值与范围以代码约束为准）。
+`url_regex` 使用 Python `re` 语法，匹配方式是 `re.search(..., flags=re.IGNORECASE)`。
 
-### 10.1 `extract`
+常见写法：
+
+- 开头/结尾锚点：`^...$`
+- 分组：`(play|vod)`
+- 数字：`\\d+`
+- 字符类：`[a-z0-9_-]+`
+- 可选段：`(?:/index)?`
+
+注意：
+
+- JSON 中反斜杠要转义，例如 `\d+` 要写成 `\\d+`
+- 非法正则会被判定为规则文件错误，触发 broken+重建
+
+## 10. Action 总览
+
+动作统一结构：
 
 ```json
-{ "type": "extract", "args": {} }
+{
+  "type": "click",
+  "when": ">=2",
+  "args": {}
+}
 ```
 
-### 10.2 `recover`
+字段：
+
+- `type`：动作类型（必填）
+- `when`：尝试轮次表达式（可选）
+- `args`：动作参数对象（可选，取决于动作类型）
+
+可用动作类型：
+
+- `chain`
+- `wait`
+- `wait_for_selector`
+- `wait_group`
+- `play_media`
+- `click`
+- `hover`
+- `fill`
+- `wait_for_load_state`
+- `goto`
+- `evaluate`
+- `scroll`
+- `mouse_click`
+- `press`
+- `log`
+
+不再支持作为配置动作的类型：
+
+- `extract`
+- `recover`
+- `wait_for_candidates`
+
+这三类行为已改为内置监测流程，不再通过规则文件配置。
+
+## 11. 通用参数：`target` / `selector(s)`
+
+### 11.1 `target`
+
+可选值：
+
+- `page`：仅主页面
+- `frame` 或 `frames`：仅 iframe
+- `all` 或 `page_and_frames`：主页面 + 所有 iframe
+
+### 11.2 `selector` 与 `selectors`
+
+- `selector`：单个选择器字符串
+- `selectors`：选择器数组
+- 两者可同时出现，程序会合并后使用
+- `$player`：播放器选择器宏，展开为内置常见播放器选择器集合
+
+## 12. Action 字段明细与示例
+
+### 12.1 `chain`
+
+`args` 字段：
+
+- `name`：链名（必填，字符串）
 
 ```json
-{ "type": "recover", "args": {} }
+{ "type": "chain", "when": "=1", "args": { "name": "first_pass" } }
 ```
 
-### 10.3 `wait`
+### 12.2 `wait`
+
+`args` 字段：
+
+- `ms`：等待毫秒数，`0~30000`
 
 ```json
-{ "type": "wait", "args": { "ms": 300 } }
+{ "type": "wait", "when": ">=1", "args": { "ms": 1200 } }
 ```
 
-### 10.4 `wait_for_candidates`
+### 12.3 `wait_for_selector`
+
+`args` 字段：
+
+- `selector` / `selectors`：至少提供一个
+- `state`：`attached | detached | visible | hidden`
+- `match`：`any | all`
+- `target`：见第 11 节
+- `timeout_ms`：`100~60000`
+- `poll_ms`：`50~1000`，轮询间隔毫秒
 
 ```json
-{ "type": "wait_for_candidates", "args": { "ms": 1500 } }
+{
+  "type": "wait_for_selector",
+  "when": ">=1",
+  "args": {
+    "selectors": ["$player", ".video-wrap"],
+    "state": "visible",
+    "match": "any",
+    "target": "all",
+    "timeout_ms": 6000,
+    "poll_ms": 150
+  }
+}
 ```
 
-### 10.5 `play_media`
+### 12.4 `wait_group`
+
+`args` 字段：
+
+- `mode`：`any | all`
+- `timeout_ms`：`100~120000`
+- `poll_ms`：`50~1000`
+- `group_actions`：并行子动作数组（仅允许 `wait` / `wait_for_selector` / `wait_group`）
 
 ```json
-{ "type": "play_media", "args": { "target": "page" } }
+{
+  "type": "wait_group",
+  "when": ">=1",
+  "args": {
+    "mode": "any",
+    "timeout_ms": 7000,
+    "poll_ms": 120,
+    "group_actions": [
+      {
+        "type": "wait_for_selector",
+        "args": {
+          "selectors": ["video", ".player"],
+          "state": "visible",
+          "match": "any",
+          "target": "all",
+          "timeout_ms": 6500,
+          "poll_ms": 150
+        }
+      },
+      { "type": "wait", "args": { "ms": 1000 } }
+    ]
+  }
+}
 ```
 
-### 10.6 `click`
+### 12.5 `play_media`
+
+`args` 字段：
+
+- `target`：见第 11 节
 
 ```json
-{ "type": "click", "args": { "selectors": ["$player"], "repeat": 2 } }
+{ "type": "play_media", "when": "=1", "args": { "target": "page" } }
 ```
 
-### 10.7 `hover`
+### 12.6 `click`
+
+`args` 字段：
+
+- `selector` / `selectors`（至少一个）
+- `target`
+- `repeat`：`1~20`
+- `wait_ms`：每轮点击后等待，`0~30000`
+- `max_per_selector`：每个选择器最多尝试元素数，`1~20`
+- `visible_timeout_ms`：元素可见判定超时，`100~10000`
+- `click_timeout_ms`：点击超时，`100~20000`
+- `wait_after_click_ms`：单次点击后恢复前等待，`0~10000`
 
 ```json
-{ "type": "hover", "args": { "selectors": [".player"] } }
+{
+  "type": "click",
+  "when": ">=2",
+  "args": {
+    "selectors": ["$player", ".play-btn"],
+    "target": "all",
+    "repeat": 2,
+    "wait_ms": 1200,
+    "max_per_selector": 2,
+    "visible_timeout_ms": 800,
+    "click_timeout_ms": 1600,
+    "wait_after_click_ms": 300
+  }
+}
 ```
 
-### 10.8 `fill`
+### 12.7 `hover`
+
+`args` 字段：
+
+- `selector` / `selectors`（至少一个）
+- `target`
+- `repeat`：`1~20`
+- `max_per_selector`：`1~20`
+- `visible_timeout_ms`：`100~10000`
+- `hover_timeout_ms`：`100~20000`
+- `wait_ms`：`0~30000`
 
 ```json
-{ "type": "fill", "args": { "selector": "input[name='q']", "value": "m3u8" } }
+{
+  "type": "hover",
+  "when": ">=2",
+  "args": {
+    "selectors": [".player-wrap"],
+    "target": "all",
+    "repeat": 1,
+    "max_per_selector": 1,
+    "visible_timeout_ms": 700,
+    "hover_timeout_ms": 1200,
+    "wait_ms": 500
+  }
+}
 ```
 
-### 10.9 `wait_for_selector`
+### 12.8 `fill`
+
+`args` 字段：
+
+- `selector` / `selectors`（至少一个）
+- `target`
+- `value`：填充值，字符串
+- `index`：命中元素下标，`>=0`
+- `fill_timeout_ms`：`100~30000`
+- `visible_timeout_ms`：`100~10000`
+- `require_visible`：布尔
+- `submit_key`：可选按键（如 `Enter`）
 
 ```json
-{ "type": "wait_for_selector", "args": { "selector": ".player", "state": "visible" } }
+{
+  "type": "fill",
+  "when": "=1",
+  "args": {
+    "selector": "input[name='wd']",
+    "target": "page",
+    "value": "m3u8",
+    "index": 0,
+    "fill_timeout_ms": 3000,
+    "visible_timeout_ms": 800,
+    "require_visible": true,
+    "submit_key": "Enter"
+  }
+}
 ```
 
-### 10.10 `wait_for_load_state`
+### 12.9 `wait_for_load_state`
+
+`args` 字段：
+
+- `state`：`domcontentloaded | load | networkidle | commit`
+- `timeout_ms`：`100~60000`
 
 ```json
-{ "type": "wait_for_load_state", "args": { "state": "networkidle", "timeout_ms": 8000 } }
+{
+  "type": "wait_for_load_state",
+  "when": "=1",
+  "args": {
+    "state": "networkidle",
+    "timeout_ms": 12000
+  }
+}
 ```
 
-### 10.11 `goto`
+### 12.10 `goto`
+
+`args` 字段：
+
+- `url`：目标 URL（必填，支持相对 URL）
+- `wait_until`：`domcontentloaded | load | networkidle | commit`
+- `timeout_ms`：`100~120000`
 
 ```json
-{ "type": "goto", "args": { "url": "/play", "wait_until": "domcontentloaded" } }
+{
+  "type": "goto",
+  "when": "=1",
+  "args": {
+    "url": "/play/12345.html",
+    "wait_until": "domcontentloaded",
+    "timeout_ms": 18000
+  }
+}
 ```
 
-### 10.12 `evaluate`
+### 12.11 `evaluate`
+
+`args` 字段：
+
+- `script`：JS 脚本（必填，字符串）
+- `selector`：可选；存在时执行 `eval_on_selector_all`
+- `target`：可选；配合 `selector` 使用
+- `arg`：可选；脚本参数
 
 ```json
-{ "type": "evaluate", "args": { "script": "() => console.log('ping')" } }
+{
+  "type": "evaluate",
+  "when": ">=2",
+  "args": {
+    "script": "(els) => els.forEach(el => el.click())",
+    "selector": ".play-btn",
+    "target": "all"
+  }
+}
 ```
 
-### 10.13 `scroll`
+### 12.12 `scroll`
+
+`args` 字段：
+
+- `deltas`：滚轮 Y 偏移数组（推荐）
+- `y`：当 `deltas` 不存在时的单次 Y 偏移
+- `x`：滚轮 X 偏移
+- `wait_after_scroll_ms`：每次滚动后等待，`0~30000`
 
 ```json
-{ "type": "scroll", "args": { "deltas": [240, 800], "wait_for_candidates_ms": 1200 } }
+{
+  "type": "scroll",
+  "when": ">=2",
+  "args": {
+    "deltas": [240, 900, 1500],
+    "x": 0,
+    "wait_after_scroll_ms": 800
+  }
+}
 ```
 
-### 10.14 `mouse_click`
+### 12.13 `mouse_click`
+
+`args` 字段：
+
+- `position.x` / `position.y`：点击位置（数值或 `center`/`middle`）
+- `x` / `y`：可选备用写法
+- `button`：`left | right | middle`
+- `click_count`：`1~3`
+- `delay_ms`：`0~3000`
 
 ```json
-{ "type": "mouse_click", "args": { "position": { "x": "center", "y": "center" } } }
+{
+  "type": "mouse_click",
+  "when": ">=2",
+  "args": {
+    "position": { "x": "center", "y": "center" },
+    "button": "left",
+    "click_count": 1,
+    "delay_ms": 0
+  }
+}
 ```
 
-### 10.15 `press`
+### 12.14 `press`
+
+`args` 字段：
+
+- `key`：键名（必填，如 `Space`、`Enter`）
 
 ```json
-{ "type": "press", "args": { "key": "Space" } }
+{ "type": "press", "when": ">=2", "args": { "key": "Space" } }
 ```
 
-### 10.16 `log`
+### 12.15 `log`
+
+`args` 字段：
+
+- `message`：日志文本
 
 ```json
-{ "type": "log", "args": { "message": "debug" } }
+{ "type": "log", "when": "=1", "args": { "message": "site-rule-hit" } }
 ```
 
-### 10.17 `chain`
+## 13. 递归探测与规则的关系
 
-```json
-{ "type": "chain", "args": { "name": "close_popup" } }
-```
+递归探测由主配置 `recursionDepth` 控制，与规则动作链独立：
 
-## 11. 推荐组织方式
+- 第 1 层：用户输入 URL
+- 第 2 层及以后：从“已加载页面/响应文本”提取到的页面链接继续探测
+- `monitorTries` 仅控制每一层 URL 的尝试次数
+- `monitorInteraction` 仅控制是否执行动作链
 
-1. 把通用流程放到 `chains`（例如“首次流程”“重试流程”）。
-2. 在 `global.actions` 只做流程编排（调用 chain）。
-3. 站点差异写在 `sites[].actions`，只改必要步骤。
-4. 所有动作统一为 `type + when + args`。
-5. 逐步加动作，先 `click + wait_for_candidates`，再补 `scroll/hover/evaluate`。
+规则文件用于“如何操作页面”，不控制“是否提取 m3u8”这一核心行为。  
+链接提取始终由监测引擎持续执行。
+
+## 14. 运行日志中的规则命中信息
+
+每次监测开始前会打印：
+
+- 规则文件来源路径
+- 命中站点规则数量
+- 每条命中规则的 `name / host / url_contains / url_regex / actions_count`
+
+该日志用于确认规则匹配是否成功。

@@ -33,14 +33,14 @@ def default_config():
         "filename": "output",
         "fileExt": 0,
         "fileExtText": FILE_EXT_OPTIONS[0],
-        "deep": True,
-        "depth": 2,
+        "recursionEnabled": True,
+        "recursionDepth": 2,
         "monitorTryEnabled": True,
         "monitorTries": 3,
         "monitorInteraction": True,
         "downloadList": True,
-        "downloadMode": 0,
-        "downloadModeText": DOWNLOAD_MODE_OPTIONS[0],
+        "downloadMode": 1,
+        "downloadModeText": DOWNLOAD_MODE_OPTIONS[1],
         "stopMode": 0,
         "stopModeText": STOP_MODE_OPTIONS[0],
         "listMode": 0,
@@ -78,26 +78,7 @@ def _to_int(value, default, min_value=None, max_value=None):
     return number
 
 
-def _normalize_depth_value(value, default_depth):
-    if isinstance(value, str):
-        text = value.strip().lower()
-        alias_map = {
-            "off": 0,
-            "none": 0,
-            "disabled": 0,
-            "lite": 1,
-            "light": 1,
-            "basic": 1,
-            "simple": 1,
-            "standard": 2,
-            "normal": 2,
-            "default": 2,
-            "deep": 3,
-            "full": 3,
-            "aggressive": 3,
-        }
-        if text in alias_map:
-            return alias_map[text]
+def _normalize_recursion_depth(value, default_depth):
     return _to_int(value, default_depth)
 
 
@@ -149,7 +130,7 @@ def _validate_config_payload(payload):
         raise ValueError(f"config schema mismatch missing={missing} extra={extra}")
 
     bool_keys = {
-        "deep",
+        "recursionEnabled",
         "monitorTryEnabled",
         "monitorInteraction",
         "downloadList",
@@ -158,7 +139,7 @@ def _validate_config_payload(payload):
     }
     int_ranges = {
         "fileExt": (0, len(FILE_EXT_OPTIONS) - 1),
-        "depth": (1, 3),
+        "recursionDepth": (1, 6),
         "monitorTries": (1, 5),
         "downloadMode": (0, len(DOWNLOAD_MODE_OPTIONS) - 1),
         "stopMode": (0, len(STOP_MODE_OPTIONS) - 1),
@@ -218,9 +199,9 @@ def normalize_config_dict(data):
     stop_mode = _to_int(merged.get("stopMode"), defaults["stopMode"], 0, len(STOP_MODE_OPTIONS) - 1)
     list_mode = _to_int(merged.get("listMode"), defaults["listMode"], 0, 2)
     max_parallel = _to_int(merged.get("maxParallel"), defaults["maxParallel"], 1, 999)
-    deep_enabled = _to_bool(merged.get("deep"), defaults["deep"])
-    depth = _normalize_depth_value(merged.get("depth"), defaults["depth"])
-    depth = _to_int(depth, defaults["depth"], 1, 3)
+    recursion_enabled = _to_bool(merged.get("recursionEnabled"), defaults["recursionEnabled"])
+    recursion_depth = _normalize_recursion_depth(merged.get("recursionDepth"), defaults["recursionDepth"])
+    recursion_depth = _to_int(recursion_depth, defaults["recursionDepth"], 1, 6)
     monitor_try_enabled = _to_bool(merged.get("monitorTryEnabled"), defaults["monitorTryEnabled"])
     monitor_tries = _to_int(merged.get("monitorTries"), defaults["monitorTries"], 1, 5)
     monitor_interaction = _to_bool(merged.get("monitorInteraction"), defaults["monitorInteraction"])
@@ -244,8 +225,8 @@ def normalize_config_dict(data):
         "filename": filename,
         "fileExt": file_ext,
         "fileExtText": FILE_EXT_OPTIONS[file_ext],
-        "deep": deep_enabled,
-        "depth": depth,
+        "recursionEnabled": recursion_enabled,
+        "recursionDepth": recursion_depth,
         "monitorTryEnabled": monitor_try_enabled,
         "monitorTries": monitor_tries,
         "monitorInteraction": monitor_interaction,
@@ -321,8 +302,10 @@ class Worker(QThread):
         self.folder = config["folder"]
         self.filename = config["filename"]
         self.fileExtText = config["fileExtText"]
-        self.deep = config["deep"]
-        self.depth = config["depth"]
+        self.recursionEnabled = config["recursionEnabled"]
+        self.recursionDepth = config["recursionDepth"]
+        if not self.recursionEnabled:
+            self.recursionDepth = 1
         self.downloadList = True
         self.downloadMode = config["downloadMode"]
         self.downloadModeText = config["downloadModeText"]
@@ -374,7 +357,10 @@ class Worker(QThread):
     def run(self):
         try:
             url_input, folder, filename = self.URL, self.folder, self.filename
-            file_ext_text, deep, depth, download_list = self.fileExtText, self.deep, self.depth, self.downloadList
+            file_ext_text = self.fileExtText
+            recursion_enabled = self.recursionEnabled
+            recursion_depth = self.recursionDepth
+            download_list = self.downloadList
             download_mode, download_mode_text = self.downloadMode, self.downloadModeText
             list_mode = self.listMode
             list_mode_text = self.listModeText
@@ -409,9 +395,8 @@ class Worker(QThread):
                 print(f"\t\t****Folder={folder}****")
                 print(f"\t\t****Filename={this_filename}****")
                 print(f"\t\t****FileExtention={file_ext_text}****")
-                print(f"\t\t****?deep finding={deep}****")
-                if deep:
-                    print(f"\t\t    >> Depth = {depth}")
+                print(f"\t\t****?recursion enabled={recursion_enabled}****")
+                print(f"\t\t    >> recursion depth = {recursion_depth}")
                 print(f"\t\t****?save download list={download_list}")
                 print(f"\t\t****Download mode={download_mode_text}****")
                 print(f"\t\t****Max parallel={max_parallel}****")
@@ -447,9 +432,9 @@ class Worker(QThread):
                         # 监测网址获取下载地址
                         monitor = MonitorM3U8(
                             url,
-                            deep,
-                            depth,
-                            proxy_config,
+                            recursion_enabled=recursion_enabled,
+                            recursion_depth=recursion_depth,
+                            proxy_config=proxy_config,
                             monitor_config=monitor_config,
                         )
                         l1, l2 = monitor.simple()
@@ -465,8 +450,8 @@ class Worker(QThread):
                     "folder": folder,
                     "filename": this_filename,
                     "fileExtText": file_ext_text,
-                    "deep": deep,
-                    "depth": depth,
+                    "recursionEnabled": recursion_enabled,
+                    "recursionDepth": recursion_depth,
                     "downloadList": download_list,
                     "downloadMode": download_mode,
                     "downloadModeText": download_mode_text,
@@ -491,16 +476,28 @@ class Worker(QThread):
                     print("Interrupted Success!")
                     return
 
-                # 开始遍历：
+                print(f"\t\t****Detected m3u8 count={len(current_urls)}****")
+
+                success_target_map = {0: 0, 1: 1, 2: 5}
+                success_target = success_target_map.get(download_mode, None)
+                successful_videos = 0
+                target_reached = False
+
+                # 所有模式都先完成探测，然后进入下载阶段；
+                # 首个/前5个按“真实成功视频”数量计数，而不是按候选序号截断。
                 for i, i_url in enumerate(current_urls):
                     if self._is_interrupted:
                         print("Interrupted Success!")
                         return
 
-                    if download_mode == 0 or (download_mode == 1 and i > 0) or (download_mode == 2 and i >= 5):
+                    if success_target is not None and successful_videos >= success_target:
+                        target_reached = True
                         if download_list:
                             d[str(i)] = {"url": i_url, "completed": False}
-                    else:
+                        continue
+
+                    completed = False
+                    if download_mode != 0:
                         try:
                             x = DownloadM3U8(
                                 folder,
@@ -510,23 +507,40 @@ class Worker(QThread):
                                 session_hints=monitor_session_hints,
                             )
                         except ValueError as e:
-                            if "m3u8 read error" in str(e):
-                                continue  # 继续剩余识别到的m3u8的下载
-                            raise e
+                            if "m3u8 read error" not in str(e):
+                                raise e
+                            print(f"\n********skip invalid m3u8: {i_url}********\n")
+                            x = None
 
-                        x.DonwloadAndWrite()
+                        if x is not None:
+                            x.DonwloadAndWrite()
 
-                        # 程序中调用ffmpeg.exe的逻辑（非dll接口）
-                        success_segments = len(x.fileNameList) - len(x.failedNameList)
-                        if success_segments <= 0:
-                            print("\n********skip ffmpeg: no downloadable segments********\n")
-                        else:
-                            print(f"\n********starting to generate {file_ext_text}********")
-                            x.process_video_with_ffmpeg(this_filename, file_ext_text)
-                            print(f"\n********{file_ext_text} completed generating********\n\n")
+                            success_segments = len(x.fileNameList) - len(x.failedNameList)
+                            if success_segments <= 0:
+                                print("\n********skip ffmpeg: no downloadable segments********\n")
+                            else:
+                                print(f"\n********starting to generate {file_ext_text}********")
+                                ffmpeg_ok = x.process_video_with_ffmpeg(this_filename, file_ext_text)
+                                if ffmpeg_ok:
+                                    completed = True
+                                    successful_videos += 1
+                                    print(f"\n********{file_ext_text} completed generating********\n\n")
+                                else:
+                                    print("\n********ffmpeg failed; continue next candidate********\n")
 
-                        if download_list:
-                            d[str(i)] = {"url": i_url, "completed": True}
+                    if download_list:
+                        d[str(i)] = {"url": i_url, "completed": completed}
+
+                if success_target is None:
+                    print(f"\t\t****Downloaded success videos={successful_videos} (mode=all)****")
+                elif download_mode == 0:
+                    print("\t\t****Download mode=不下载, skip downloading candidates****")
+                else:
+                    state = "reached" if target_reached or successful_videos >= success_target else "not reached"
+                    print(
+                        f"\t\t****Downloaded success videos={successful_videos}/{success_target} "
+                        f"target {state}****"
+                    )
 
                 # 保存下载列表
                 if len(current_urls) != 0:
@@ -578,6 +592,8 @@ class MyConfigWindow(QMainWindow):
 
     def on_recursionCheckBox_toggled(self, checked):
         self.ui.deepSpinBox.setEnabled(checked)
+        if not checked:
+            self.ui.deepSpinBox.setValue(1)
 
     def on_attemptCheckBox_toggled(self, checked):
         self.ui.attemptSpinBox.setEnabled(checked)
@@ -604,8 +620,8 @@ class MyConfigWindow(QMainWindow):
 
     def _collect_download_preset(self):
         return {
-            "deep": self.ui.recursionCheckBox.isChecked(),
-            "depth": self.ui.deepSpinBox.value(),
+            "recursionEnabled": self.ui.recursionCheckBox.isChecked(),
+            "recursionDepth": self.ui.deepSpinBox.value(),
             "monitorTryEnabled": self.ui.attemptCheckBox.isChecked(),
             "monitorTries": self.ui.attemptSpinBox.value(),
             "monitorInteraction": self.ui.interactionCheckBox.isChecked(),
@@ -621,15 +637,15 @@ class MyConfigWindow(QMainWindow):
         current = dict(self.Config.data if isinstance(self.Config.data, dict) else {})
         current.update(payload)
         normalized = normalize_config_dict(current)
-        self.ui.recursionCheckBox.setChecked(normalized["deep"])
-        self.ui.deepSpinBox.setValue(normalized["depth"])
+        self.ui.recursionCheckBox.setChecked(normalized["recursionEnabled"])
+        self.ui.deepSpinBox.setValue(normalized["recursionDepth"])
         self.ui.attemptCheckBox.setChecked(normalized.get("monitorTryEnabled", True))
         self.ui.attemptSpinBox.setValue(normalized.get("monitorTries", 3))
         self.ui.interactionCheckBox.setChecked(normalized.get("monitorInteraction", True))
         self.ui.headlessCheckBox.setChecked(normalized["monitorHeadless"])
         self.ui.downloadModeCombo.setCurrentIndex(normalized["downloadMode"])
         self.ui.concurrentSpinBox.setValue(normalized["maxParallel"])
-        self.on_recursionCheckBox_toggled(normalized["deep"])
+        self.on_recursionCheckBox_toggled(normalized["recursionEnabled"])
         self.on_attemptCheckBox_toggled(normalized.get("monitorTryEnabled", True))
 
     def loadConfig(self):
@@ -638,8 +654,8 @@ class MyConfigWindow(QMainWindow):
             self.ui.folderEdit.setText(config["folder"])
             self.ui.filenameEdit.setText(config["filename"])
             self.ui.fileExtCombo.setCurrentIndex(config["fileExt"])
-            self.ui.recursionCheckBox.setChecked(config["deep"])
-            self.ui.deepSpinBox.setValue(config["depth"])
+            self.ui.recursionCheckBox.setChecked(config["recursionEnabled"])
+            self.ui.deepSpinBox.setValue(config["recursionDepth"])
             self.ui.attemptCheckBox.setChecked(config.get("monitorTryEnabled", True))
             self.ui.attemptSpinBox.setValue(config.get("monitorTries", 3))
             self.ui.interactionCheckBox.setChecked(config.get("monitorInteraction", True))
@@ -652,7 +668,7 @@ class MyConfigWindow(QMainWindow):
             self.ui.proxyPasswordEdit.setText(config["proxyPassword"])
             self.ui.concurrentSpinBox.setValue(config["maxParallel"])
             self.ui.headlessCheckBox.setChecked(config["monitorHeadless"])
-            self.on_recursionCheckBox_toggled(config["deep"])
+            self.on_recursionCheckBox_toggled(config["recursionEnabled"])
             self.on_attemptCheckBox_toggled(config.get("monitorTryEnabled", True))
             self.on_proxyCheckBox_toggled(config["proxyEnabled"])
         except Exception:
@@ -671,8 +687,8 @@ class MyConfigWindow(QMainWindow):
         self.ui.folderEdit.setText(config["folder"])
         self.ui.filenameEdit.setText(config["filename"])
         self.ui.fileExtCombo.setCurrentIndex(config["fileExt"])
-        self.ui.recursionCheckBox.setChecked(config["deep"])
-        self.ui.deepSpinBox.setValue(config["depth"])
+        self.ui.recursionCheckBox.setChecked(config["recursionEnabled"])
+        self.ui.deepSpinBox.setValue(config["recursionDepth"])
         self.ui.attemptCheckBox.setChecked(config["monitorTryEnabled"])
         self.ui.attemptSpinBox.setValue(config["monitorTries"])
         self.ui.interactionCheckBox.setChecked(config["monitorInteraction"])
@@ -685,7 +701,7 @@ class MyConfigWindow(QMainWindow):
         self.ui.proxyPasswordEdit.setText(config["proxyPassword"])
         self.ui.concurrentSpinBox.setValue(config["maxParallel"])
         self.ui.headlessCheckBox.setChecked(config["monitorHeadless"])
-        self.on_recursionCheckBox_toggled(config["deep"])
+        self.on_recursionCheckBox_toggled(config["recursionEnabled"])
         self.on_attemptCheckBox_toggled(config["monitorTryEnabled"])
         self.on_proxyCheckBox_toggled(config["proxyEnabled"])
 
@@ -695,8 +711,8 @@ class MyConfigWindow(QMainWindow):
         updated["filename"] = self.ui.filenameEdit.text().strip()
         updated["fileExt"] = self.ui.fileExtCombo.currentIndex()
         updated["fileExtText"] = self.ui.fileExtCombo.currentText().strip()
-        updated["deep"] = self.ui.recursionCheckBox.isChecked()
-        updated["depth"] = self.ui.deepSpinBox.value()
+        updated["recursionEnabled"] = self.ui.recursionCheckBox.isChecked()
+        updated["recursionDepth"] = self.ui.deepSpinBox.value()
         updated["monitorTryEnabled"] = self.ui.attemptCheckBox.isChecked()
         updated["monitorTries"] = self.ui.attemptSpinBox.value()
         updated["monitorInteraction"] = self.ui.interactionCheckBox.isChecked()
@@ -835,8 +851,8 @@ class MyWindow(QMainWindow):
                 "folder": run_config["folder"],
                 "filename": run_config["filename"],
                 "fileExtText": run_config["fileExtText"],
-                "deep": run_config["deep"],
-                "depth": run_config["depth"],
+                "recursionEnabled": run_config["recursionEnabled"],
+                "recursionDepth": run_config["recursionDepth"],
                 "downloadList": True,
                 "downloadMode": run_config["downloadMode"],
                 "downloadModeText": run_config["downloadModeText"],
@@ -879,8 +895,8 @@ class MyWindow(QMainWindow):
             "folder": folder,
             "filename": filename,
             "fileExtText": config["fileExtText"],
-            "deep": config["deep"],
-            "depth": config["depth"],
+            "recursionEnabled": config["recursionEnabled"],
+            "recursionDepth": config["recursionDepth"],
             "downloadList": True,
             "downloadMode": config["downloadMode"],
             "downloadModeText": config["downloadModeText"],

@@ -77,35 +77,23 @@ class MonitorM3U8:
         return [text] if text else []
 
     @staticmethod
-    def _normalize_depth_value(depth, deep_enabled=True):
-        if not deep_enabled:
-            return 0
-        if isinstance(depth, str):
-            text = depth.strip().lower()
-            alias_map = {
-                "off": 0,
-                "none": 0,
-                "disabled": 0,
-                "lite": 1,
-                "light": 1,
-                "basic": 1,
-                "simple": 1,
-                "standard": 2,
-                "normal": 2,
-                "default": 2,
-                "deep": 3,
-                "full": 3,
-                "aggressive": 3,
-            }
-            if text in alias_map:
-                return alias_map[text]
+    def _normalize_recursion_depth(recursion_depth, recursion_enabled=True):
+        if not recursion_enabled:
+            return 1
         try:
-            number = int(depth)
+            number = int(recursion_depth)
         except (TypeError, ValueError):
-            return 0
-        return number
+            return 1
+        return max(1, number)
 
-    def __init__(self, URL, deep=True, depth=2, proxy_config=None, monitor_config=None):
+    def __init__(
+        self,
+        URL,
+        recursion_enabled=True,
+        recursion_depth=1,
+        proxy_config=None,
+        monitor_config=None,
+    ):
         self.timer = TimerTimer(1, self.TimerPrint)
         self.URL = URL
         self.possible = set()
@@ -113,8 +101,11 @@ class MonitorM3U8:
         self.page_candidates = set()
         self.url_hints = {}
         self.lock = threading.Lock()
-        self.depth = self._normalize_depth_value(depth, deep)
-        self.depth = self.depth if 0 <= self.depth <= 3 else 0
+        self.recursion_enabled = self._to_bool(recursion_enabled, True)
+        self.recursion_depth = self._normalize_recursion_depth(
+            recursion_depth,
+            self.recursion_enabled,
+        )
         self.proxy_config = self._normalize_proxy_config(proxy_config)
         self.monitor_config = self._normalize_monitor_config(monitor_config)
         self.headless = self.monitor_config["headless"]
@@ -229,17 +220,13 @@ class MonitorM3U8:
             "chains": {
                 "monitor_first_pass": [
                     {
-                        "type": "extract",
-                        "args": {},
-                    },
-                    {
                         "type": "play_media",
                         "args": {
                             "target": "page",
                         },
                     },
                     {
-                        "type": "wait_for_candidates",
+                        "type": "wait",
                         "args": {
                             "ms": 1400,
                         },
@@ -251,19 +238,24 @@ class MonitorM3U8:
                                 "$player",
                             ],
                             "repeat": 1,
-                            "wait_for_candidates_ms": 1800,
+                            "wait_ms": 1600,
                         },
-                    },
-                    {
-                        "type": "recover",
-                        "args": {},
-                    },
-                    {
-                        "type": "extract",
-                        "args": {},
                     },
                 ],
                 "monitor_retry_pass": [
+                    {
+                        "type": "wait_for_selector",
+                        "args": {
+                            "selectors": [
+                                "$player",
+                            ],
+                            "state": "visible",
+                            "match": "any",
+                            "target": "all",
+                            "timeout_ms": 4000,
+                            "poll_ms": 150,
+                        },
+                    },
                     {
                         "type": "click",
                         "args": {
@@ -272,14 +264,14 @@ class MonitorM3U8:
                             ],
                             "target": "all",
                             "repeat": 2,
-                            "wait_for_candidates_ms": 1500,
+                            "wait_ms": 1200,
                         },
                     },
                     {
                         "type": "scroll",
                         "args": {
                             "deltas": [240, 800, 1500],
-                            "wait_for_candidates_ms": 1200,
+                            "wait_after_scroll_ms": 900,
                         },
                     },
                     {
@@ -297,20 +289,7 @@ class MonitorM3U8:
                             "key": "Space",
                         },
                     },
-                    {
-                        "type": "wait_for_candidates",
-                        "args": {
-                            "ms": 1200,
-                        },
-                    },
-                    {
-                        "type": "recover",
-                        "args": {},
-                    },
-                    {
-                        "type": "extract",
-                        "args": {},
-                    },
+                    {"type": "wait", "args": {"ms": 1200}},
                 ],
             },
             "global": {
@@ -320,14 +299,14 @@ class MonitorM3U8:
                         "args": {
                             "name": "monitor_first_pass",
                         },
-                        "when": "first",
+                        "when": "=1",
                     },
                     {
                         "type": "chain",
                         "args": {
                             "name": "monitor_retry_pass",
                         },
-                        "when": "retry",
+                        "when": ">=2",
                     },
                 ],
             },
@@ -374,11 +353,6 @@ class MonitorM3U8:
             return []
         normalized = []
         for item in actions:
-            if isinstance(item, str):
-                action_type = item.strip().lower()
-                if action_type:
-                    normalized.append({"type": action_type, "args": {}})
-                continue
             if not isinstance(item, dict):
                 continue
             action = dict(item)
@@ -389,28 +363,273 @@ class MonitorM3U8:
             args = action.get("args")
             if not isinstance(args, dict):
                 args = {}
-            # 兼容旧风格：将顶层参数自动归并到 args，统一后续处理方式
-            for key in list(action.keys()):
-                if key in self._action_meta_keys():
-                    continue
-                if key not in args:
-                    args[key] = action[key]
-                action.pop(key, None)
             action["args"] = args
+            action.pop("name", None)
             normalized.append(action)
         return normalized
 
     @staticmethod
-    def _action_meta_keys():
-        return {"type", "when", "args"}
+    def _action_type_whitelist():
+        return {
+            "chain",
+            "wait",
+            "wait_for_selector",
+            "wait_group",
+            "play_media",
+            "click",
+            "hover",
+            "fill",
+            "wait_for_load_state",
+            "goto",
+            "evaluate",
+            "scroll",
+            "mouse_click",
+            "press",
+            "log",
+        }
+
+    @staticmethod
+    def _wait_group_child_type_whitelist():
+        return {"wait", "wait_for_selector", "wait_group"}
+
+    @staticmethod
+    def _action_arg_whitelist():
+        return {
+            "chain": {"name"},
+            "wait": {"ms"},
+            "wait_for_selector": {"selector", "selectors", "state", "match", "target", "timeout_ms", "poll_ms"},
+            "wait_group": {"mode", "timeout_ms", "poll_ms", "group_actions"},
+            "play_media": {"target"},
+            "click": {
+                "selector",
+                "selectors",
+                "target",
+                "repeat",
+                "wait_ms",
+                "max_per_selector",
+                "visible_timeout_ms",
+                "click_timeout_ms",
+                "wait_after_click_ms",
+            },
+            "hover": {
+                "selector",
+                "selectors",
+                "target",
+                "repeat",
+                "max_per_selector",
+                "visible_timeout_ms",
+                "hover_timeout_ms",
+                "wait_ms",
+            },
+            "fill": {
+                "selector",
+                "selectors",
+                "target",
+                "value",
+                "index",
+                "fill_timeout_ms",
+                "visible_timeout_ms",
+                "require_visible",
+                "submit_key",
+            },
+            "wait_for_load_state": {"state", "timeout_ms"},
+            "goto": {"url", "wait_until", "timeout_ms"},
+            "evaluate": {"script", "selector", "target", "arg"},
+            "scroll": {"deltas", "y", "x", "wait_after_scroll_ms"},
+            "mouse_click": {"position", "x", "y", "button", "click_count", "delay_ms"},
+            "press": {"key"},
+            "log": {"message"},
+        }
+
+    @staticmethod
+    def _is_number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    @staticmethod
+    def _is_non_empty_text(value):
+        return isinstance(value, str) and value.strip() != ""
+
+    def _validate_action_args(self, action_type, args, path):
+        whitelist = self._action_arg_whitelist().get(action_type, set())
+        extra_args = sorted(set(args.keys()) - set(whitelist))
+        if extra_args:
+            raise ValueError(f"{path}.args has unsupported fields: {extra_args}")
+
+        if action_type == "chain":
+            if not self._is_non_empty_text(args.get("name", "")):
+                raise ValueError(f"{path}.args.name is required")
+            return
+
+        if action_type in {"click", "hover", "fill", "wait_for_selector"}:
+            selector = args.get("selector")
+            selectors = args.get("selectors")
+            has_selector = self._is_non_empty_text(selector)
+            if not has_selector:
+                if isinstance(selectors, (list, tuple, set)):
+                    has_selector = any(self._is_non_empty_text(item) for item in selectors)
+                else:
+                    has_selector = self._is_non_empty_text(selectors)
+            if not has_selector:
+                raise ValueError(f"{path}.args requires selector or selectors")
+
+        if "target" in args:
+            target = str(args.get("target", "")).strip().lower()
+            if target not in {"page", "frame", "frames", "all", "page_and_frames"}:
+                raise ValueError(f"{path}.args.target invalid: {args.get('target')}")
+
+        if action_type == "wait":
+            if "ms" in args and not self._is_number(args.get("ms")):
+                raise ValueError(f"{path}.args.ms must be number")
+            return
+
+        if action_type == "wait_for_selector":
+            if "state" in args:
+                state = str(args.get("state", "")).strip().lower()
+                if state not in {"attached", "detached", "visible", "hidden"}:
+                    raise ValueError(f"{path}.args.state invalid: {args.get('state')}")
+            if "match" in args:
+                match = str(args.get("match", "")).strip().lower()
+                if match not in {"any", "all"}:
+                    raise ValueError(f"{path}.args.match invalid: {args.get('match')}")
+            for key in ("timeout_ms", "poll_ms"):
+                if key in args and not self._is_number(args.get(key)):
+                    raise ValueError(f"{path}.args.{key} must be number")
+            return
+
+        if action_type == "wait_group":
+            if "mode" in args:
+                mode = str(args.get("mode", "")).strip().lower()
+                if mode not in {"any", "all"}:
+                    raise ValueError(f"{path}.args.mode invalid: {args.get('mode')}")
+            for key in ("timeout_ms", "poll_ms"):
+                if key in args and not self._is_number(args.get(key)):
+                    raise ValueError(f"{path}.args.{key} must be number")
+            group_actions = args.get("group_actions")
+            if not isinstance(group_actions, list) or len(group_actions) == 0:
+                raise ValueError(f"{path}.args.group_actions must be non-empty array")
+            for index, child_action in enumerate(group_actions):
+                self._validate_action_item(
+                    child_action,
+                    f"{path}.args.group_actions[{index}]",
+                    in_wait_group=True,
+                )
+            return
+
+        if action_type == "play_media":
+            return
+
+        if action_type == "click":
+            for key in (
+                "repeat",
+                "wait_ms",
+                "max_per_selector",
+                "visible_timeout_ms",
+                "click_timeout_ms",
+                "wait_after_click_ms",
+            ):
+                if key in args and not self._is_number(args.get(key)):
+                    raise ValueError(f"{path}.args.{key} must be number")
+            return
+
+        if action_type == "hover":
+            for key in (
+                "repeat",
+                "max_per_selector",
+                "visible_timeout_ms",
+                "hover_timeout_ms",
+                "wait_ms",
+            ):
+                if key in args and not self._is_number(args.get(key)):
+                    raise ValueError(f"{path}.args.{key} must be number")
+            return
+
+        if action_type == "fill":
+            if "value" in args and not isinstance(args.get("value"), str):
+                raise ValueError(f"{path}.args.value must be string")
+            if "require_visible" in args and not isinstance(args.get("require_visible"), bool):
+                raise ValueError(f"{path}.args.require_visible must be bool")
+            for key in ("index", "fill_timeout_ms", "visible_timeout_ms"):
+                if key in args and not self._is_number(args.get(key)):
+                    raise ValueError(f"{path}.args.{key} must be number")
+            if "submit_key" in args and not isinstance(args.get("submit_key"), str):
+                raise ValueError(f"{path}.args.submit_key must be string")
+            return
+
+        if action_type == "wait_for_load_state":
+            if "state" in args:
+                state = str(args.get("state", "")).strip().lower()
+                if state not in {"domcontentloaded", "load", "networkidle", "commit"}:
+                    raise ValueError(f"{path}.args.state invalid: {args.get('state')}")
+            if "timeout_ms" in args and not self._is_number(args.get("timeout_ms")):
+                raise ValueError(f"{path}.args.timeout_ms must be number")
+            return
+
+        if action_type == "goto":
+            if not self._is_non_empty_text(args.get("url", "")):
+                raise ValueError(f"{path}.args.url is required")
+            if "wait_until" in args:
+                wait_until = str(args.get("wait_until", "")).strip().lower()
+                if wait_until not in {"domcontentloaded", "load", "networkidle", "commit"}:
+                    raise ValueError(f"{path}.args.wait_until invalid: {args.get('wait_until')}")
+            if "timeout_ms" in args and not self._is_number(args.get("timeout_ms")):
+                raise ValueError(f"{path}.args.timeout_ms must be number")
+            return
+
+        if action_type == "evaluate":
+            if not self._is_non_empty_text(args.get("script", "")):
+                raise ValueError(f"{path}.args.script is required")
+            if "selector" in args and not isinstance(args.get("selector"), str):
+                raise ValueError(f"{path}.args.selector must be string")
+            return
+
+        if action_type == "scroll":
+            if "deltas" in args and not isinstance(args.get("deltas"), list):
+                raise ValueError(f"{path}.args.deltas must be array")
+            for key in ("y", "x", "wait_after_scroll_ms"):
+                if key in args and not self._is_number(args.get(key)):
+                    raise ValueError(f"{path}.args.{key} must be number")
+            return
+
+        if action_type == "mouse_click":
+            if "position" in args and not isinstance(args.get("position"), dict):
+                raise ValueError(f"{path}.args.position must be object")
+            if "button" in args:
+                button = str(args.get("button", "")).strip().lower()
+                if button not in {"left", "right", "middle"}:
+                    raise ValueError(f"{path}.args.button invalid: {args.get('button')}")
+            for key in ("x", "y", "click_count", "delay_ms"):
+                if key in args:
+                    value = args.get(key)
+                    if isinstance(value, str) and value.strip().lower() in {"center", "middle"}:
+                        continue
+                    if not self._is_number(value):
+                        raise ValueError(f"{path}.args.{key} must be number")
+            if "position" in args:
+                for key in ("x", "y"):
+                    if key not in args["position"]:
+                        continue
+                    value = args["position"][key]
+                    if isinstance(value, str) and value.strip().lower() in {"center", "middle"}:
+                        continue
+                    if not self._is_number(value):
+                        raise ValueError(f"{path}.args.position.{key} must be number")
+            return
+
+        if action_type == "press":
+            if not self._is_non_empty_text(args.get("key", "")):
+                raise ValueError(f"{path}.args.key is required")
+            return
+
+        if action_type == "log":
+            if "message" in args and not isinstance(args.get("message"), str):
+                raise ValueError(f"{path}.args.message must be string")
+            return
 
     def _action_has_arg(self, action, key):
         if not isinstance(action, dict):
             return False
         args = action.get("args", {})
-        if isinstance(args, dict) and key in args:
-            return True
-        return key in action
+        return isinstance(args, dict) and key in args
 
     def _action_arg(self, action, key, default=None):
         if not isinstance(action, dict):
@@ -418,8 +637,6 @@ class MonitorM3U8:
         args = action.get("args", {})
         if isinstance(args, dict) and key in args:
             return args.get(key)
-        if key in action:
-            return action.get(key)
         return default
 
     def _normalize_chain_map(self, chains):
@@ -432,6 +649,114 @@ class MonitorM3U8:
                 continue
             normalized[name] = self._normalize_action_list(raw_actions)
         return normalized
+
+    def _validate_action_item(self, action, path, in_wait_group=False):
+        if not isinstance(action, dict):
+            raise ValueError(f"{path} action must be object")
+        allowed = {"type", "when", "args"}
+        extra = sorted(set(action.keys()) - allowed)
+        if extra:
+            raise ValueError(f"{path} action has unsupported fields: {extra}")
+        action_type = str(action.get("type", "")).strip().lower()
+        if action_type == "":
+            raise ValueError(f"{path} action.type is required")
+        valid_types = (
+            self._wait_group_child_type_whitelist()
+            if in_wait_group
+            else self._action_type_whitelist()
+        )
+        if action_type not in valid_types:
+            raise ValueError(f"{path} action.type unsupported: {action_type}")
+        if "args" in action and not isinstance(action.get("args"), dict):
+            raise ValueError(f"{path} action.args must be object")
+        args = action.get("args", {})
+        if not isinstance(args, dict):
+            args = {}
+        self._validate_action_args(action_type, args, path)
+        if "when" in action:
+            when_value = action.get("when")
+            if isinstance(when_value, (list, tuple, set)):
+                for idx, item in enumerate(when_value):
+                    if not isinstance(item, (str, int, float)):
+                        raise ValueError(f"{path} action.when[{idx}] must be string/number")
+            elif not isinstance(when_value, (str, int, float)):
+                raise ValueError(f"{path} action.when must be string/number")
+            tokens = self._normalize_action_when_tokens(when_value)
+            if "never" in tokens:
+                raise ValueError(f"{path} action.when invalid: {when_value}")
+
+    def _validate_action_list(self, actions, path, in_wait_group=False):
+        if not isinstance(actions, list):
+            raise ValueError(f"{path} must be array")
+        for index, action in enumerate(actions):
+            self._validate_action_item(
+                action,
+                f"{path}[{index}]",
+                in_wait_group=in_wait_group,
+            )
+
+    def _validate_chain_map(self, chains, path):
+        if not isinstance(chains, dict):
+            raise ValueError(f"{path} must be object")
+        for name, actions in chains.items():
+            chain_name = str(name).strip()
+            if chain_name == "":
+                raise ValueError(f"{path} chain name cannot be empty")
+            self._validate_action_list(actions, f"{path}.{chain_name}")
+
+    def _validate_monitor_rules_payload(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("monitor rules root must be object")
+
+        allowed_root = {"chains", "global", "sites"}
+        missing_root = sorted(allowed_root - set(payload.keys()))
+        extra_root = sorted(set(payload.keys()) - allowed_root)
+        if missing_root or extra_root:
+            raise ValueError(f"monitor rules schema mismatch missing={missing_root} extra={extra_root}")
+
+        self._validate_chain_map(payload.get("chains"), "chains")
+
+        global_value = payload.get("global")
+        if not isinstance(global_value, dict):
+            raise ValueError("global must be object")
+        extra_global = sorted(set(global_value.keys()) - {"actions", "chains"})
+        if extra_global:
+            raise ValueError(f"global has unsupported fields: {extra_global}")
+        self._validate_action_list(global_value.get("actions", []), "global.actions")
+        self._validate_chain_map(global_value.get("chains", {}), "global.chains")
+
+        sites = payload.get("sites")
+        if not isinstance(sites, list):
+            raise ValueError("sites must be array")
+        for index, site in enumerate(sites):
+            path = f"sites[{index}]"
+            if not isinstance(site, dict):
+                raise ValueError(f"{path} must be object")
+            extra_site = sorted(set(site.keys()) - {"name", "enabled", "match", "actions", "chains"})
+            if extra_site:
+                raise ValueError(f"{path} has unsupported fields: {extra_site}")
+            if "name" in site and not isinstance(site.get("name"), str):
+                raise ValueError(f"{path}.name must be string")
+            if "enabled" in site and not isinstance(site.get("enabled"), bool):
+                raise ValueError(f"{path}.enabled must be bool")
+
+            match = site.get("match", {})
+            if not isinstance(match, dict):
+                raise ValueError(f"{path}.match must be object")
+            extra_match = sorted(set(match.keys()) - {"host", "url_contains", "url_regex"})
+            if extra_match:
+                raise ValueError(f"{path}.match has unsupported fields: {extra_match}")
+            host = match.get("host", [])
+            if not isinstance(host, (str, list, tuple, set)):
+                raise ValueError(f"{path}.match.host must be string/array")
+            contains = match.get("url_contains", [])
+            if not isinstance(contains, (str, list, tuple, set)):
+                raise ValueError(f"{path}.match.url_contains must be string/array")
+            if "url_regex" in match and not isinstance(match.get("url_regex"), str):
+                raise ValueError(f"{path}.match.url_regex must be string")
+
+            self._validate_action_list(site.get("actions", []), f"{path}.actions")
+            self._validate_chain_map(site.get("chains", {}), f"{path}.chains")
 
     def _expand_action_chains(self, actions, chains, trace=None, depth=0):
         if depth > 10:
@@ -452,7 +777,7 @@ class MonitorM3U8:
                 continue
 
             args = action.get("args", {})
-            chain_name = str((args.get("name") if isinstance(args, dict) else None) or action.get("name", "")).strip()
+            chain_name = str(args.get("name", "") if isinstance(args, dict) else "").strip()
             if chain_name == "":
                 print("\tmonitor rules chain action skipped: missing name")
                 continue
@@ -472,9 +797,7 @@ class MonitorM3U8:
                 trace=trace + [chain_name],
                 depth=depth + 1,
             )
-            override_when = str(
-                action.get("when", (args.get("when") if isinstance(args, dict) else ""))
-            ).strip().lower()
+            override_when = str(action.get("when", "")).strip().lower()
             if override_when == "":
                 expanded.extend(nested_actions)
                 continue
@@ -496,18 +819,9 @@ class MonitorM3U8:
         if not isinstance(match, dict):
             match = {}
 
-        host_value = match.get("host", source.get("host", source.get("hosts", [])))
-        contains_value = match.get(
-            "url_contains",
-            source.get("url_contains", source.get("urlContains", [])),
-        )
-        url_regex = str(
-            match.get(
-                "url_regex",
-                source.get("url_regex", source.get("urlRegex", "")),
-            )
-            or ""
-        ).strip()
+        host_value = match.get("host", [])
+        contains_value = match.get("url_contains", [])
+        url_regex = str(match.get("url_regex", "") or "").strip()
 
         actions = self._normalize_action_list(source.get("actions", []))
         chains = self._normalize_chain_map(source.get("chains", {}))
@@ -529,8 +843,7 @@ class MonitorM3U8:
         try:
             with open(rules_path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
-            if not isinstance(payload, dict):
-                raise ValueError("root must be object")
+            self._validate_monitor_rules_payload(payload)
         except Exception as exc:
             print(f"\tmonitor rules load failed: {exc}")
             payload = self._repair_rules_file(rules_path)
@@ -556,10 +869,6 @@ class MonitorM3U8:
         global_source = payload.get("global")
         if not isinstance(global_source, dict):
             global_source = {}
-        if "actions" in payload and "actions" not in global_source:
-            global_source["actions"] = payload["actions"]
-        if "chains" in payload and "chains" not in global_source:
-            global_source["chains"] = payload["chains"]
 
         global_rule = self._normalize_rule_entry(global_source, "global")
         if global_rule is not None:
@@ -602,22 +911,27 @@ class MonitorM3U8:
         host = (parsed.hostname or "").lower()
 
         host_patterns = rule.get("host_patterns", [])
-        if host_patterns and not any(fnmatch.fnmatch(host, pattern) for pattern in host_patterns):
-            return False
+        host_match = None
+        if host_patterns:
+            host_match = any(fnmatch.fnmatch(host, pattern) for pattern in host_patterns)
 
         url_contains = rule.get("url_contains", [])
-        if url_contains and not any(keyword in lowered_url for keyword in url_contains):
-            return False
+        contains_match = None
+        if url_contains:
+            contains_match = any(keyword in lowered_url for keyword in url_contains)
 
         url_regex = str(rule.get("url_regex", "")).strip()
+        regex_match = None
         if url_regex != "":
             try:
-                if re.search(url_regex, normalized_url, flags=re.IGNORECASE) is None:
-                    return False
+                regex_match = re.search(url_regex, normalized_url, flags=re.IGNORECASE) is not None
             except re.error:
-                return False
+                regex_match = False
 
-        return True
+        checks = [value for value in (host_match, contains_match, regex_match) if value is not None]
+        if len(checks) == 0:
+            return True
+        return any(checks)
 
     def _resolve_active_interaction_rule(self, target_url):
         global_rule = self.monitor_rules.get("global", {})
@@ -625,13 +939,24 @@ class MonitorM3U8:
             "name": str(global_rule.get("name", "global")).strip() or "global",
             "source": self.monitor_rules.get("source", ""),
             "matched_sites": [],
+            "matched_site_details": [],
             "actions": list(global_rule.get("actions", [])),
         }
 
         for site_rule in self.monitor_rules.get("sites", []):
             if not self._rule_matches_url(site_rule, target_url):
                 continue
-            active["matched_sites"].append(site_rule.get("name", "site"))
+            site_name = site_rule.get("name", "site")
+            active["matched_sites"].append(site_name)
+            active["matched_site_details"].append(
+                {
+                    "name": site_name,
+                    "host_patterns": list(site_rule.get("host_patterns", [])),
+                    "url_contains": list(site_rule.get("url_contains", [])),
+                    "url_regex": str(site_rule.get("url_regex", "")),
+                    "actions_count": len(site_rule.get("actions", [])),
+                }
+            )
             active["actions"].extend(site_rule.get("actions", []))
 
         if active["matched_sites"]:
@@ -1008,7 +1333,7 @@ class MonitorM3U8:
         for found_url in self._extract_candidate_urls_from_text(body, page_url):
             if self._is_m3u8_url(found_url):
                 self._add_m3u8_candidate(found_url, referer=page_url)
-            elif self.depth == 3:
+            elif self.recursion_depth > 1:
                 self._add_page_candidate(found_url)
 
     def _recover_page_if_needed(self, page, stable_url):
@@ -1065,7 +1390,7 @@ class MonitorM3U8:
         if self._is_m3u8_url(response_url):
             self._add_m3u8_candidate(response_url, referer=referer or self.URL)
 
-        if self.depth == 3 and status in [301, 302, 303, 307, 308]:
+        if self.recursion_depth > 1 and status in [301, 302, 303, 307, 308]:
             redirect_to = headers.get("location", "")
             self._add_page_candidate(redirect_to, base_url=response_url)
 
@@ -1092,7 +1417,7 @@ class MonitorM3U8:
         for found_url in self._extract_candidate_urls_from_text(body_text, response_url):
             if self._is_m3u8_url(found_url):
                 self._add_m3u8_candidate(found_url, referer=referer or response_url or self.URL)
-            elif self.depth == 3:
+            elif self.recursion_depth > 1:
                 self._add_page_candidate(found_url)
 
     def handle_request(self, request):
@@ -1119,14 +1444,6 @@ class MonitorM3U8:
             failure_text = ""
         if "BLOCKED_BY_CLIENT" in failure_text:
             self.last_blocked_by_client = True
-
-    def _wait_for_new_candidates(self, page, before_count, timeout_ms=3000):
-        deadline = time.time() + timeout_ms / 1000.0
-        while time.time() < deadline:
-            if len(self.possible) > before_count:
-                return True
-            page.wait_for_timeout(250)
-        return False
 
     def _try_click_selectors(
         self,
@@ -1231,76 +1548,92 @@ class MonitorM3U8:
         self.session_hints["cookies"] = self._merge_cookies(self.session_hints.get("cookies", []), cookies)
 
     @staticmethod
+    def _normalize_action_when_tokens(raw_when):
+        values = raw_when if isinstance(raw_when, (list, tuple, set)) else [raw_when]
+        parsed_tokens = []
+        had_explicit_value = False
+        for value in values:
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                had_explicit_value = True
+                parsed_tokens.append(("=", int(value)))
+                continue
+
+            token = str(value).strip().lower().replace(" ", "")
+            if token == "" or token == "null":
+                continue
+            had_explicit_value = True
+
+            if token.startswith("attempt"):
+                token = token[len("attempt") :]
+                if token.startswith(":"):
+                    token = token[1:]
+                token = token.strip()
+
+            if token.isdigit():
+                parsed_tokens.append(("=", int(token)))
+                continue
+
+            m = re.match(r"^(==|=|>=|<=|>|<)(\d+|last)$", token)
+            if m:
+                op = m.group(1)
+                if op == "==":
+                    op = "="
+                raw_value = m.group(2)
+                value = "last" if raw_value == "last" else int(raw_value)
+                parsed_tokens.append((op, value))
+                continue
+
+        if not had_explicit_value:
+            return {"always"}
+        if len(parsed_tokens) == 0:
+            return {"never"}
+        return parsed_tokens
+
+    @staticmethod
     def _action_enabled_for_interaction_stage(action, interaction_stage, attempt=1, tries=1):
         if not isinstance(action, dict):
             return False
+
         args = action.get("args", {})
-        args_when = args.get("when", "all") if isinstance(args, dict) else "all"
-        when = str(action.get("when", args_when)).strip().lower()
-        if when in {"", "all", "*"}:
+        args_when = args.get("when", "") if isinstance(args, dict) else ""
+        raw_when = action.get("when", args_when)
+        tokens = MonitorM3U8._normalize_action_when_tokens(raw_when)
+
+        if tokens == {"always"}:
             return True
-        if when in {"none", "never", "skip"}:
+        if "never" in tokens:
             return False
 
         attempt_num = max(1, int(attempt) if isinstance(attempt, (int, float)) else 1)
         tries_num = max(1, int(tries) if isinstance(tries, (int, float)) else 1)
 
-        alias_map = {
-            "first": "attempt=1",
-            "init": "attempt=1",
-            "initial": "attempt=1",
-            "start": "attempt=1",
-            "startup": "attempt=1",
-            "retry": "attempt>=2",
-            "retries": "attempt>=2",
-            "again": "attempt>=2",
-            "last": "attempt=last",
-            "final": "attempt=last",
-            "end": "attempt=last",
-        }
-        when = alias_map.get(when, when)
-
-        if when.startswith("attempt"):
-            expr = when.replace("attempt", "", 1).strip()
-            for op in ("==", ">=", "<=", ">", "<", "="):
-                if expr.startswith(op):
-                    raw_value = expr[len(op) :].strip()
-                    if raw_value in {"last", "final", "end"}:
-                        value = tries_num
-                    else:
-                        try:
-                            value = int(raw_value)
-                        except (TypeError, ValueError):
-                            return True
-                    if op in {"=", "=="}:
-                        return attempt_num == value
-                    if op == ">":
-                        return attempt_num > value
-                    if op == ">=":
-                        return attempt_num >= value
-                    if op == "<":
-                        return attempt_num < value
-                    if op == "<=":
-                        return attempt_num <= value
-                    return True
-
-        if when == "first":
-            return interaction_stage <= 1
-        if when == "retry":
-            return interaction_stage > 1
-        return True
+        for op, raw_value in tokens:
+            value = tries_num if raw_value == "last" else raw_value
+            if not isinstance(value, int):
+                continue
+            if op == "=" and attempt_num == value:
+                return True
+            if op == ">" and attempt_num > value:
+                return True
+            if op == ">=" and attempt_num >= value:
+                return True
+            if op == "<" and attempt_num < value:
+                return True
+            if op == "<=" and attempt_num <= value:
+                return True
+        return False
 
     def _build_action_handlers(self):
         return {
-            "extract": self._action_extract,
-            "recover": self._action_recover,
             "wait": self._action_wait,
-            "wait_for_candidates": self._action_wait_for_candidates,
             "play_media": self._action_play_media,
             "click": self._action_click,
             "hover": self._action_hover,
             "fill": self._action_fill,
             "wait_for_selector": self._action_wait_for_selector,
+            "wait_group": self._action_wait_group,
             "wait_for_load_state": self._action_wait_for_load_state,
             "goto": self._action_goto,
             "evaluate": self._action_evaluate,
@@ -1344,25 +1677,140 @@ class MonitorM3U8:
             return value
         return default
 
+    @staticmethod
+    def _wait_selector_state(raw_value, default="visible"):
+        value = str(raw_value or "").strip().lower()
+        if value in {"attached", "detached", "visible", "hidden"}:
+            return value
+        return default
+
+    @staticmethod
+    def _match_mode(raw_value, default="any"):
+        value = str(raw_value or "").strip().lower()
+        if value in {"any", "all"}:
+            return value
+        return default
+
+    @staticmethod
+    def _element_visible(element, timeout_ms=120):
+        try:
+            return bool(element.is_visible(timeout=timeout_ms))
+        except TypeError:
+            try:
+                return bool(element.is_visible())
+            except Exception:
+                return False
+        except Exception:
+            return False
+
+    def _selector_state_satisfied(self, target, selector, state):
+        try:
+            locator = target.locator(selector)
+            count = locator.count()
+        except Exception:
+            return False
+
+        if state == "attached":
+            return count > 0
+        if state == "detached":
+            return count == 0
+        if state == "visible":
+            if count <= 0:
+                return False
+            for index in range(min(count, 3)):
+                try:
+                    if self._element_visible(locator.nth(index)):
+                        return True
+                except Exception:
+                    continue
+            return False
+        if state == "hidden":
+            if count <= 0:
+                return True
+            for index in range(min(count, 3)):
+                try:
+                    if self._element_visible(locator.nth(index)):
+                        return False
+                except Exception:
+                    continue
+            return True
+        return False
+
+    def _selector_condition_satisfied(self, page, selectors, state="visible", match_mode="any", target_mode="page"):
+        if len(selectors) == 0:
+            return False
+
+        targets = self._iter_action_targets(page, target_mode)
+
+        if match_mode == "all":
+            for selector in selectors:
+                if not any(
+                    self._selector_state_satisfied(target, selector, state)
+                    for target in targets
+                ):
+                    return False
+            return True
+
+        for selector in selectors:
+            if any(
+                self._selector_state_satisfied(target, selector, state)
+                for target in targets
+            ):
+                return True
+        return False
+
+    def _wait_for_selector_condition(
+        self,
+        page,
+        selectors,
+        state="visible",
+        match_mode="any",
+        target_mode="page",
+        timeout_ms=5000,
+        poll_ms=150,
+    ):
+        deadline = time.time() + timeout_ms / 1000.0
+        poll_seconds = max(0.05, self._to_int(poll_ms, 150, 50, 1000) / 1000.0)
+        while time.time() < deadline:
+            if self._selector_condition_satisfied(
+                page,
+                selectors,
+                state=state,
+                match_mode=match_mode,
+                target_mode=target_mode,
+            ):
+                return True
+            self._pause(page, int(poll_seconds * 1000))
+        return self._selector_condition_satisfied(
+            page,
+            selectors,
+            state=state,
+            match_mode=match_mode,
+            target_mode=target_mode,
+        )
+
     def _resolve_mouse_coordinate(self, raw_value, fallback):
         if isinstance(raw_value, str) and raw_value.strip().lower() in {"center", "middle"}:
             return fallback
         return self._to_int(raw_value, fallback)
 
-    def _action_extract(self, page, action, stable_url, before_count):
-        self._extract_candidates_from_page(page)
-
-    def _action_recover(self, page, action, stable_url, before_count):
-        self._recover_page_if_needed(page, stable_url)
+    @staticmethod
+    def _pause(page, wait_ms):
+        duration_ms = max(0, int(wait_ms))
+        if duration_ms <= 0:
+            return
+        try:
+            if page is not None:
+                page.wait_for_timeout(duration_ms)
+                return
+        except Exception:
+            pass
+        time.sleep(duration_ms / 1000.0)
 
     def _action_wait(self, page, action, stable_url, before_count):
         wait_ms = self._to_int(self._action_arg(action, "ms", 300), 300, 0, 30000)
         if wait_ms > 0:
-            page.wait_for_timeout(wait_ms)
-
-    def _action_wait_for_candidates(self, page, action, stable_url, before_count):
-        timeout_ms = self._to_int(self._action_arg(action, "ms", 1500), 1500, 0, 30000)
-        self._wait_for_new_candidates(page, before_count, timeout_ms=timeout_ms)
+            self._pause(page, wait_ms)
 
     def _action_play_media(self, page, action, stable_url, before_count):
         for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
@@ -1379,12 +1827,6 @@ class MonitorM3U8:
         visible_timeout_ms = self._to_int(self._action_arg(action, "visible_timeout_ms", 600), 600, 100, 10000)
         click_timeout_ms = self._to_int(self._action_arg(action, "click_timeout_ms", 1400), 1400, 100, 20000)
         wait_after_click_ms = self._to_int(self._action_arg(action, "wait_after_click_ms", 250), 250, 0, 10000)
-        wait_for_candidates_ms = self._to_int(
-            self._action_arg(action, "wait_for_candidates_ms", 0),
-            0,
-            0,
-            30000,
-        )
 
         for _ in range(repeat):
             for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
@@ -1400,8 +1842,6 @@ class MonitorM3U8:
                 )
             if wait_ms > 0:
                 page.wait_for_timeout(wait_ms)
-            if wait_for_candidates_ms > 0:
-                self._wait_for_new_candidates(page, before_count, timeout_ms=wait_for_candidates_ms)
 
     def _action_hover(self, page, action, stable_url, before_count):
         selectors = self._resolve_action_selectors(action)
@@ -1413,7 +1853,6 @@ class MonitorM3U8:
         visible_timeout_ms = self._to_int(self._action_arg(action, "visible_timeout_ms", 600), 600, 100, 10000)
         hover_timeout_ms = self._to_int(self._action_arg(action, "hover_timeout_ms", 1200), 1200, 100, 20000)
         wait_ms = self._to_int(self._action_arg(action, "wait_ms", 200), 200, 0, 30000)
-        wait_for_candidates_ms = self._to_int(self._action_arg(action, "wait_for_candidates_ms", 0), 0, 0, 30000)
 
         for _ in range(repeat):
             for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
@@ -1436,8 +1875,6 @@ class MonitorM3U8:
 
             if wait_ms > 0:
                 page.wait_for_timeout(wait_ms)
-            if wait_for_candidates_ms > 0:
-                self._wait_for_new_candidates(page, before_count, timeout_ms=wait_for_candidates_ms)
 
     def _action_fill(self, page, action, stable_url, before_count):
         selectors = self._resolve_action_selectors(action)
@@ -1473,18 +1910,155 @@ class MonitorM3U8:
                     continue
 
     def _action_wait_for_selector(self, page, action, stable_url, before_count):
-        selector = str(self._action_arg(action, "selector", "")).strip()
-        if selector == "":
+        selectors = self._resolve_action_selectors(action)
+        if len(selectors) == 0:
             return
-        timeout_ms = self._to_int(self._action_arg(action, "timeout_ms", 5000), 5000, 100, 60000)
-        state = str(self._action_arg(action, "state", "visible")).strip().lower() or "visible"
 
-        for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
-            try:
-                target.wait_for_selector(selector, state=state, timeout=timeout_ms)
-                return
-            except Exception:
+        timeout_ms = self._to_int(self._action_arg(action, "timeout_ms", 5000), 5000, 100, 60000)
+        state = self._wait_selector_state(self._action_arg(action, "state", "visible"), "visible")
+        match_mode = self._match_mode(self._action_arg(action, "match", "any"), "any")
+        target_mode = self._action_arg(action, "target", "page")
+        poll_ms = self._to_int(self._action_arg(action, "poll_ms", 150), 150, 50, 1000)
+
+        self._wait_for_selector_condition(
+            page,
+            selectors,
+            state=state,
+            match_mode=match_mode,
+            target_mode=target_mode,
+            timeout_ms=timeout_ms,
+            poll_ms=poll_ms,
+        )
+
+    def _compile_wait_group_items_from_actions(self, group_actions):
+        compiled = []
+        if not isinstance(group_actions, list):
+            return compiled
+
+        for child_action in group_actions:
+            if not isinstance(child_action, dict):
                 continue
+            child_type = str(child_action.get("type", "")).strip().lower()
+
+            if child_type == "wait_for_selector":
+                selectors = self._resolve_action_selectors(child_action)
+                if len(selectors) == 0:
+                    continue
+                compiled.append(
+                    {
+                        "kind": "selector",
+                        "selectors": selectors,
+                        "state": self._wait_selector_state(
+                            self._action_arg(child_action, "state", "visible"),
+                            "visible",
+                        ),
+                        "match": self._match_mode(
+                            self._action_arg(child_action, "match", "any"),
+                            "any",
+                        ),
+                        "target": self._action_arg(child_action, "target", "page"),
+                    }
+                )
+                continue
+
+            if child_type == "wait":
+                delay_ms = self._to_int(self._action_arg(child_action, "ms", 0), 0, 0, 120000)
+                compiled.append(
+                    {
+                        "kind": "timer",
+                        "delay_s": delay_ms / 1000.0,
+                    }
+                )
+                continue
+
+            if child_type == "wait_group":
+                nested_mode = self._match_mode(self._action_arg(child_action, "mode", "all"), "all")
+                nested_group_actions = self._action_arg(child_action, "group_actions", [])
+                nested_items = self._compile_wait_group_items_from_actions(nested_group_actions)
+                if len(nested_items) == 0:
+                    continue
+                compiled.append(
+                    {
+                        "kind": "group",
+                        "mode": nested_mode,
+                        "items": nested_items,
+                    }
+                )
+
+        return compiled
+
+    def _prepare_wait_group_item_state(self, item, start_time):
+        if not isinstance(item, dict):
+            return
+        kind = item.get("kind")
+        if kind == "group":
+            item["_start_time"] = start_time
+            item["_done"] = [False] * len(item.get("items", []))
+            for child in item.get("items", []):
+                self._prepare_wait_group_item_state(child, start_time)
+
+    def _wait_group_item_satisfied(self, page, item, now_time, group_start_time):
+        kind = item.get("kind")
+        if kind == "selector":
+            return self._selector_condition_satisfied(
+                page,
+                item.get("selectors", []),
+                state=item.get("state", "visible"),
+                match_mode=item.get("match", "any"),
+                target_mode=item.get("target", "page"),
+            )
+        if kind == "timer":
+            return (now_time - group_start_time) >= item.get("delay_s", 0.0)
+        if kind == "group":
+            nested_items = item.get("items", [])
+            nested_done = item.get("_done", [])
+            nested_start = item.get("_start_time", group_start_time)
+            for index, nested in enumerate(nested_items):
+                if index >= len(nested_done) or nested_done[index]:
+                    continue
+                if self._wait_group_item_satisfied(page, nested, now_time, nested_start):
+                    nested_done[index] = True
+            if len(nested_done) == 0:
+                return False
+            if item.get("mode", "all") == "any":
+                return any(nested_done)
+            return all(nested_done)
+        return False
+
+    def _action_wait_group(self, page, action, stable_url, before_count):
+        timeout_ms = self._to_int(self._action_arg(action, "timeout_ms", 8000), 8000, 100, 120000)
+        poll_ms = self._to_int(self._action_arg(action, "poll_ms", 150), 150, 50, 1000)
+        mode = self._match_mode(self._action_arg(action, "mode", "all"), "all")
+        group_actions = self._action_arg(action, "group_actions", [])
+        compiled = self._compile_wait_group_items_from_actions(group_actions)
+        if len(compiled) == 0:
+            return
+
+        start_time = time.time()
+        deadline = start_time + timeout_ms / 1000.0
+        condition_done = [False] * len(compiled)
+        for item in compiled:
+            self._prepare_wait_group_item_state(item, start_time)
+        poll_seconds = max(0.05, poll_ms / 1000.0)
+
+        while time.time() < deadline:
+            now = time.time()
+            for index, condition in enumerate(compiled):
+                if condition_done[index]:
+                    continue
+                condition_done[index] = self._wait_group_item_satisfied(
+                    page,
+                    condition,
+                    now,
+                    start_time,
+                )
+
+            if mode == "any" and any(condition_done):
+                return
+            if mode == "all" and all(condition_done):
+                return
+
+            self._pause(page, int(poll_seconds * 1000))
 
     def _action_wait_for_load_state(self, page, action, stable_url, before_count):
         state = self._wait_until_value(self._action_arg(action, "state"), default="networkidle")
@@ -1533,13 +2107,6 @@ class MonitorM3U8:
             deltas = [self._action_arg(action, "y", 240)]
         wheel_x = self._to_int(self._action_arg(action, "x", 0), 0)
         wait_after_scroll_ms = self._to_int(self._action_arg(action, "wait_after_scroll_ms", 250), 250, 0, 30000)
-        wait_for_candidates_ms = self._to_int(
-            self._action_arg(action, "wait_for_candidates_ms", 1200),
-            1200,
-            0,
-            30000,
-        )
-        recover_after_scroll = self._to_bool(self._action_arg(action, "recover_after_scroll", True), True)
 
         for delta in deltas:
             try:
@@ -1548,10 +2115,6 @@ class MonitorM3U8:
                 pass
             if wait_after_scroll_ms > 0:
                 page.wait_for_timeout(wait_after_scroll_ms)
-            if wait_for_candidates_ms > 0:
-                self._wait_for_new_candidates(page, before_count, timeout_ms=wait_for_candidates_ms)
-            if recover_after_scroll:
-                self._recover_page_if_needed(page, stable_url)
 
     def _action_mouse_click(self, page, action, stable_url, before_count):
         viewport = page.viewport_size or {"width": 1280, "height": 720}
@@ -1714,7 +2277,7 @@ class MonitorM3U8:
                         tries=tries,
                     )
 
-                if self.depth == 3:
+                if self.recursion_depth > 1:
                     self._collect_recursive_candidates(page)
 
                 if self._is_blocked_page(page):
@@ -1737,9 +2300,25 @@ class MonitorM3U8:
                         pass
 
         print(f"\n\t****monitor started****\nURL={self.URL}")
-        print(f"\theadless={self.headless}; depth={self.depth}")
+        print(f"\theadless={self.headless}; recursion_depth={self.recursion_depth}")
         print(f"\tinteraction={self.interaction_enabled}; tries={self.monitor_tries}")
         configured_actions_count = len(self.active_interaction_rule.get("actions", []))
+        print(
+            f"\tinteraction rules source="
+            f"{self.active_interaction_rule.get('source', '(builtin/default)')}"
+        )
+        print(
+            f"\tinteraction rules matched_sites="
+            f"{len(self.active_interaction_rule.get('matched_sites', []))}"
+        )
+        for site_info in self.active_interaction_rule.get("matched_site_details", []):
+            print(
+                f"\t\t- site={site_info.get('name', 'site')} "
+                f"actions={site_info.get('actions_count', 0)} "
+                f"host={site_info.get('host_patterns', [])} "
+                f"url_contains={site_info.get('url_contains', [])} "
+                f"url_regex={site_info.get('url_regex', '')}"
+            )
         if self.interaction_enabled and configured_actions_count > 0:
             print(
                 f"\tinteraction rules active="
@@ -1785,12 +2364,6 @@ class MonitorM3U8:
                     print(f"\tmonitor attempt {attempt + 1}/{tries} failed: {exc}")
                     continue
 
-                # depth=2时，只有拿到“高置信候选”才提前结束，避免首轮命中解析页后直接停下
-                if len(self.possible) > before and self.depth != 3 and self._has_strong_candidate():
-                    break
-                if len(self.possible) > before and self.depth == 3 and len(self.page_candidates) > 0:
-                    break
-
                 if self.last_blocked_by_client:
                     print("\tblocked-by-client detected, next attempt will switch strategy")
 
@@ -1815,22 +2388,34 @@ class MonitorM3U8:
         return same_site + cross_site
 
     def _run_controlled_recursion(self, possible, predicted):
+        if self.recursion_depth <= 1:
+            return possible, predicted
+
         ranked = self._rank_recursive_candidates()
         if len(ranked) == 0:
             return possible, predicted
 
-        max_nodes = 8
-        max_cross_site_nodes = 2
+        max_nodes = max(8, self.recursion_depth * 8)
+        max_cross_site_nodes = max(2, self.recursion_depth * 2)
         cross_site_used = 0
         visited = {self._normalize_url(self.URL)}
+        queued = set(visited)
+        queue = []
+        for target_url in ranked:
+            target = self._normalize_url(target_url)
+            if target == "" or target in queued:
+                continue
+            queue.append((target, 2))
+            queued.add(target)
         processed_nodes = 0
 
         print("\n\n\t\t********controlled recursion started********")
-        for target_url in ranked:
+        while queue and processed_nodes < max_nodes:
+            target, level = queue.pop(0)
+            if level > self.recursion_depth:
+                continue
             if processed_nodes >= max_nodes:
                 break
-
-            target = self._normalize_url(target_url)
             if target == "" or target in visited:
                 continue
             visited.add(target)
@@ -1843,12 +2428,12 @@ class MonitorM3U8:
             print(f"\t\t>> recurse page: {target}")
             child = MonitorM3U8(
                 target,
-                True,
-                2,
-                self.proxy_config,
+                recursion_enabled=True,
+                recursion_depth=(2 if level < self.recursion_depth else 1),
+                proxy_config=self.proxy_config,
                 monitor_config=self.monitor_config,
             )
-            child_possible, child_predicted = child.simple()
+            child_possible, child_predicted = child.simple(run_recursive=False)
             possible.extend(child_possible)
             predicted.extend(child_predicted)
             processed_nodes += 1
@@ -1859,6 +2444,13 @@ class MonitorM3U8:
                 child_hints.get("cookies", []),
             )
             self.session_hints["referer_map"].update(child_hints.get("referer_map", {}))
+            if level < self.recursion_depth:
+                for candidate_url in child._rank_recursive_candidates():
+                    next_target = self._normalize_url(candidate_url)
+                    if next_target == "" or next_target in queued:
+                        continue
+                    queue.append((next_target, level + 1))
+                    queued.add(next_target)
 
         print("\n\n\t\t********controlled recursion done********")
         return possible, predicted
@@ -1875,7 +2467,7 @@ class MonitorM3U8:
             "referer_map": dict(self.session_hints.get("referer_map", {})),
         }
 
-    def simple(self):
+    def simple(self, run_recursive=True):
         self.timer.StartTimer()
         possible, predicted = self.MonitorUrl()
         self.timer.StopTimer()
@@ -1887,11 +2479,11 @@ class MonitorM3U8:
             [print(f"predicted m3u8\t= {i}") for i in list(predicted)]
             print("\n\n")
 
-        if self.depth == 3:
+        if run_recursive and self.recursion_depth > 1:
             possible, predicted = self._run_controlled_recursion(possible, predicted)
             possible = list(dict.fromkeys(possible))
             predicted = list(dict.fromkeys(predicted))
-            print(f"\t\t\t>> Depth = {self.depth}\n\t>> All Resources Found:")
+            print(f"\t\t\t>> Recursion Depth = {self.recursion_depth}\n\t>> All Resources Found:")
             [print(f"possible m3u8\t= {i}") for i in list(possible)]
             [print(f"predicted m3u8\t= {i}") for i in list(predicted)]
 

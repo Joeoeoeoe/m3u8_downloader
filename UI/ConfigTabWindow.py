@@ -265,7 +265,7 @@ class Ui_ConfigWindow(object):
         font.setPointSize(9)
         self.deepSpinBox.setFont(font)
         self.deepSpinBox.setMinimum(1)
-        self.deepSpinBox.setMaximum(3)
+        self.deepSpinBox.setMaximum(6)
         self.deepSpinBox.setProperty("value", 2)
         self.deepSpinBox.setObjectName("deepSpinBox")
         self.horizontalLayout_9.addWidget(self.deepSpinBox)
@@ -445,7 +445,7 @@ class Ui_ConfigWindow(object):
 
         self.retranslateUi(ConfigWindow)
         self.tabWidget.setCurrentIndex(0)
-        self.downloadModeCombo.setCurrentIndex(0)
+        self.downloadModeCombo.setCurrentIndex(1)
         self.cancelButton.clicked.connect(ConfigWindow.close) # type: ignore
         QtCore.QMetaObject.connectSlotsByName(ConfigWindow)
 
@@ -477,13 +477,13 @@ class Ui_ConfigWindow(object):
         self.fileExtCombo.setItemText(5, _translate("ConfigWindow", ".mkv"))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.saveTab), _translate("ConfigWindow", "存储"))
         self.snifferLabel.setText(_translate("ConfigWindow", "嗅探"))
-        self.recursionCheckBox.setText(_translate("ConfigWindow", "递归搜索深度"))
+        self.recursionCheckBox.setText(_translate("ConfigWindow", "递归探测层数"))
         self.attemptCheckBox.setText(_translate("ConfigWindow", "探测尝试次数"))
         self.interactionCheckBox.setText(_translate("ConfigWindow", "浏览器交互"))
         self.headlessCheckBox.setText(_translate("ConfigWindow", "无界面探测"))
         self.crawlerLabel.setText(_translate("ConfigWindow", "爬取"))
         self.ModeLabel.setText(_translate("ConfigWindow", "下载方式："))
-        self.downloadModeCombo.setCurrentText(_translate("ConfigWindow", "不下载"))
+        self.downloadModeCombo.setCurrentText(_translate("ConfigWindow", "下载首个"))
         self.downloadModeCombo.setItemText(0, _translate("ConfigWindow", "不下载"))
         self.downloadModeCombo.setItemText(1, _translate("ConfigWindow", "下载首个"))
         self.downloadModeCombo.setItemText(2, _translate("ConfigWindow", "下载前5个"))
