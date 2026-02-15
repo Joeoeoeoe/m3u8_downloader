@@ -1,6 +1,8 @@
 # python库
+import json
 import os
 import sys
+from datetime import datetime
 
 # ui
 from PyQt5.QtCore import Qt, QObject, pyqtSignal, QThread, QProcess
@@ -22,6 +24,7 @@ DOWNLOAD_MODE_OPTIONS = ["不下载", "下载首个", "下载前5个", "下载�
 STOP_MODE_OPTIONS = ["阶段停止", "强制重启", "强制退出"]
 DEFAULT_PROXY_ADDRESS = "127.0.0.1"
 DEFAULT_PROXY_PORT = "7897"
+PRESET_DIR = os.path.join(os.getcwd(), "config", "preset")
 
 
 def default_config():
@@ -32,9 +35,12 @@ def default_config():
         "fileExtText": FILE_EXT_OPTIONS[0],
         "deep": True,
         "depth": 2,
+        "monitorTryEnabled": True,
+        "monitorTries": 3,
+        "monitorInteraction": True,
         "downloadList": True,
-        "downloadMode": 1,
-        "downloadModeText": DOWNLOAD_MODE_OPTIONS[1],
+        "downloadMode": 0,
+        "downloadModeText": DOWNLOAD_MODE_OPTIONS[0],
         "stopMode": 0,
         "stopModeText": STOP_MODE_OPTIONS[0],
         "listMode": 0,
@@ -72,6 +78,29 @@ def _to_int(value, default, min_value=None, max_value=None):
     return number
 
 
+def _normalize_depth_value(value, default_depth):
+    if isinstance(value, str):
+        text = value.strip().lower()
+        alias_map = {
+            "off": 0,
+            "none": 0,
+            "disabled": 0,
+            "lite": 1,
+            "light": 1,
+            "basic": 1,
+            "simple": 1,
+            "standard": 2,
+            "normal": 2,
+            "default": 2,
+            "deep": 3,
+            "full": 3,
+            "aggressive": 3,
+        }
+        if text in alias_map:
+            return alias_map[text]
+    return _to_int(value, default_depth)
+
+
 def _to_text(value, default=""):
     if value is None:
         return default
@@ -97,15 +126,32 @@ def _build_proxy_config(data):
     }
 
 
+def _config_schema_keys():
+    return set(default_config().keys())
+
+
+def _backup_broken_config(file_path):
+    if not file_path or not os.path.exists(file_path):
+        return ""
+    broken_path = f"{file_path}.broken-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    os.replace(file_path, broken_path)
+    return broken_path
+
+
+def _validate_config_payload(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("config must be object")
+    expected = _config_schema_keys()
+    actual = set(payload.keys())
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected)
+    if missing or extra:
+        raise ValueError(f"config schema mismatch missing={missing} extra={extra}")
+
+
 def normalize_config_dict(data):
     defaults = default_config()
     incoming = dict(data) if isinstance(data, dict) else {}
-
-    # 兼容旧字段
-    if "proxyEnabled" not in incoming:
-        incoming["proxyEnabled"] = incoming.get("useProxy", False)
-    if "maxParallel" not in incoming:
-        incoming["maxParallel"] = incoming.get("concurrentNum", defaults["maxParallel"])
 
     merged = dict(defaults)
     merged.update(incoming)
@@ -118,7 +164,11 @@ def normalize_config_dict(data):
     list_mode = _to_int(merged.get("listMode"), defaults["listMode"], 0, 2)
     max_parallel = _to_int(merged.get("maxParallel"), defaults["maxParallel"], 1, 999)
     deep_enabled = _to_bool(merged.get("deep"), defaults["deep"])
-    depth = _to_int(merged.get("depth"), defaults["depth"], 1, 3)
+    depth = _normalize_depth_value(merged.get("depth"), defaults["depth"])
+    depth = _to_int(depth, defaults["depth"], 1, 3)
+    monitor_try_enabled = _to_bool(merged.get("monitorTryEnabled"), defaults["monitorTryEnabled"])
+    monitor_tries = _to_int(merged.get("monitorTries"), defaults["monitorTries"], 1, 9)
+    monitor_interaction = _to_bool(merged.get("monitorInteraction"), defaults["monitorInteraction"])
     monitor_headless = _to_bool(merged.get("monitorHeadless"), defaults["monitorHeadless"])
     monitor_rules_path = _to_text(merged.get("monitorRulesPath"), defaults["monitorRulesPath"])
     if monitor_rules_path == "":
@@ -141,6 +191,9 @@ def normalize_config_dict(data):
         "fileExtText": FILE_EXT_OPTIONS[file_ext],
         "deep": deep_enabled,
         "depth": depth,
+        "monitorTryEnabled": monitor_try_enabled,
+        "monitorTries": monitor_tries,
+        "monitorInteraction": monitor_interaction,
         "downloadList": True,
         "downloadMode": download_mode,
         "downloadModeText": DOWNLOAD_MODE_OPTIONS[download_mode],
@@ -163,8 +216,23 @@ def normalize_config_dict(data):
 
 
 def ensure_normalized_config(config):
-    current = config.data if isinstance(config.data, dict) else {}
-    normalized = normalize_config_dict(current)
+    try:
+        current = config.data
+        _validate_config_payload(current)
+        normalized = normalize_config_dict(current)
+    except Exception as exc:
+        print(f"invalid config, reset to default: {exc}")
+        try:
+            broken_path = _backup_broken_config(getattr(config, "filePath", ""))
+            if broken_path:
+                print(f"config backup: {broken_path}")
+        except Exception as backup_exc:
+            print(f"config backup failed: {backup_exc}")
+        normalized = default_config()
+        config.data = normalized
+        config.write()
+        return normalized
+
     if current != normalized:
         config.data = normalized
         config.write()
@@ -227,7 +295,12 @@ class Worker(QThread):
         self.monitorConfig = {
             "headless": _to_bool(config.get("monitorHeadless", True), True),
             "rules_path": _to_text(config.get("monitorRulesPath", "")),
+            "tries": _to_int(config.get("monitorTries", 3), 3, 1, 9),
+            "interaction_enabled": _to_bool(config.get("monitorInteraction", True), True),
         }
+        self.monitorTryEnabled = _to_bool(config.get("monitorTryEnabled", True), True)
+        if not self.monitorTryEnabled:
+            self.monitorConfig["tries"] = 1
 
         self.monitor = monitor  # 是否进行监测（是否使用加载的列表）
         self._is_interrupted = False  # 退出标志
@@ -250,6 +323,7 @@ class Worker(QThread):
             list_mode = self.listMode
             list_mode_text = self.listModeText
             max_parallel = self.maxParallel
+            monitor_try_enabled = self.monitorTryEnabled
             proxy_config = self.proxyConfig
             monitor_config = dict(self.monitorConfig)
 
@@ -287,6 +361,8 @@ class Worker(QThread):
                 print(f"\t\t****Max parallel={max_parallel}****")
                 print(f"\t\t****Proxy={'ON' if proxy_config['enabled'] else 'OFF'}****")
                 print(f"\t\t****Monitor headless={monitor_config['headless']}****")
+                print(f"\t\t****Monitor interaction={monitor_config.get('interaction_enabled', True)}****")
+                print(f"\t\t****Monitor tries={monitor_config.get('tries', 1)}****")
                 if monitor_config.get("rules_path", "") != "":
                     print(f"\t\t****Monitor rules path={monitor_config['rules_path']}****")
                 if proxy_config["enabled"]:
@@ -346,6 +422,9 @@ class Worker(QThread):
                     "proxyUser": proxy_config["username"],
                     "proxyPassword": proxy_config["password"],
                     "maxParallel": max_parallel,
+                    "monitorTryEnabled": monitor_try_enabled,
+                    "monitorTries": monitor_config.get("tries", 1),
+                    "monitorInteraction": monitor_config.get("interaction_enabled", True),
                     "monitorHeadless": monitor_config["headless"],
                     "monitorRulesPath": monitor_config.get("rules_path", ""),
                 }
@@ -422,8 +501,11 @@ class MyConfigWindow(QMainWindow):
         self._safe_reconnect(self.ui.resetButton.clicked, self.on_resetButton_clicked)
         self._safe_reconnect(self.ui.confirmButton.clicked, self.on_confirmButton_clicked)
         self._safe_reconnect(self.ui.applyButton.clicked, self.on_applyButton_clicked)
-        self._safe_reconnect(self.ui.deepCheckBox.toggled, self.on_deepCheckBox_toggled)
+        self._safe_reconnect(self.ui.recursionCheckBox.toggled, self.on_recursionCheckBox_toggled)
+        self._safe_reconnect(self.ui.attemptCheckBox.toggled, self.on_attemptCheckBox_toggled)
         self._safe_reconnect(self.ui.proxyCheckBox.toggled, self.on_proxyCheckBox_toggled)
+        self._safe_reconnect(self.ui.savePresetButton.clicked, self.on_savePresetButton_clicked)
+        self._safe_reconnect(self.ui.loadPresetButton.clicked, self.on_loadPresetButton_clicked)
 
         # 数据
         self.Config = ConfigJson()
@@ -438,8 +520,11 @@ class MyConfigWindow(QMainWindow):
             pass
         signal.connect(slot)
 
-    def on_deepCheckBox_toggled(self, checked):
+    def on_recursionCheckBox_toggled(self, checked):
         self.ui.deepSpinBox.setEnabled(checked)
+
+    def on_attemptCheckBox_toggled(self, checked):
+        self.ui.attemptSpinBox.setEnabled(checked)
 
     def on_proxyCheckBox_toggled(self, checked):
         widgets = [
@@ -456,14 +541,52 @@ class MyConfigWindow(QMainWindow):
         for widget in widgets:
             widget.setEnabled(checked)
 
+    @staticmethod
+    def _ensure_preset_dir():
+        os.makedirs(PRESET_DIR, exist_ok=True)
+        return PRESET_DIR
+
+    def _collect_download_preset(self):
+        return {
+            "deep": self.ui.recursionCheckBox.isChecked(),
+            "depth": self.ui.deepSpinBox.value(),
+            "monitorTryEnabled": self.ui.attemptCheckBox.isChecked(),
+            "monitorTries": self.ui.attemptSpinBox.value(),
+            "monitorInteraction": self.ui.interactionCheckBox.isChecked(),
+            "monitorHeadless": self.ui.headlessCheckBox.isChecked(),
+            "downloadMode": self.ui.downloadModeCombo.currentIndex(),
+            "downloadModeText": self.ui.downloadModeCombo.currentText().strip(),
+            "maxParallel": self.ui.concurrentSpinBox.value(),
+        }
+
+    def _apply_download_preset(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("preset payload must be object")
+        current = dict(self.Config.data if isinstance(self.Config.data, dict) else {})
+        current.update(payload)
+        normalized = normalize_config_dict(current)
+        self.ui.recursionCheckBox.setChecked(normalized["deep"])
+        self.ui.deepSpinBox.setValue(normalized["depth"])
+        self.ui.attemptCheckBox.setChecked(normalized.get("monitorTryEnabled", True))
+        self.ui.attemptSpinBox.setValue(normalized.get("monitorTries", 3))
+        self.ui.interactionCheckBox.setChecked(normalized.get("monitorInteraction", True))
+        self.ui.headlessCheckBox.setChecked(normalized["monitorHeadless"])
+        self.ui.downloadModeCombo.setCurrentIndex(normalized["downloadMode"])
+        self.ui.concurrentSpinBox.setValue(normalized["maxParallel"])
+        self.on_recursionCheckBox_toggled(normalized["deep"])
+        self.on_attemptCheckBox_toggled(normalized.get("monitorTryEnabled", True))
+
     def loadConfig(self):
         try:
             config = ensure_normalized_config(self.Config)
             self.ui.folderEdit.setText(config["folder"])
             self.ui.filenameEdit.setText(config["filename"])
             self.ui.fileExtCombo.setCurrentIndex(config["fileExt"])
-            self.ui.deepCheckBox.setChecked(config["deep"])
+            self.ui.recursionCheckBox.setChecked(config["deep"])
             self.ui.deepSpinBox.setValue(config["depth"])
+            self.ui.attemptCheckBox.setChecked(config.get("monitorTryEnabled", True))
+            self.ui.attemptSpinBox.setValue(config.get("monitorTries", 3))
+            self.ui.interactionCheckBox.setChecked(config.get("monitorInteraction", True))
             self.ui.downloadModeCombo.setCurrentIndex(config["downloadMode"])
             self.ui.stopModeCombo.setCurrentIndex(config["stopMode"])
             self.ui.proxyCheckBox.setChecked(config["proxyEnabled"])
@@ -473,7 +596,8 @@ class MyConfigWindow(QMainWindow):
             self.ui.proxyPasswordEdit.setText(config["proxyPassword"])
             self.ui.concurrentSpinBox.setValue(config["maxParallel"])
             self.ui.headlessCheckBox.setChecked(config["monitorHeadless"])
-            self.on_deepCheckBox_toggled(config["deep"])
+            self.on_recursionCheckBox_toggled(config["deep"])
+            self.on_attemptCheckBox_toggled(config.get("monitorTryEnabled", True))
             self.on_proxyCheckBox_toggled(config["proxyEnabled"])
         except Exception:
             print("failed to load config: config is set to default!")
@@ -491,8 +615,11 @@ class MyConfigWindow(QMainWindow):
         self.ui.folderEdit.setText(config["folder"])
         self.ui.filenameEdit.setText(config["filename"])
         self.ui.fileExtCombo.setCurrentIndex(config["fileExt"])
-        self.ui.deepCheckBox.setChecked(config["deep"])
+        self.ui.recursionCheckBox.setChecked(config["deep"])
         self.ui.deepSpinBox.setValue(config["depth"])
+        self.ui.attemptCheckBox.setChecked(config["monitorTryEnabled"])
+        self.ui.attemptSpinBox.setValue(config["monitorTries"])
+        self.ui.interactionCheckBox.setChecked(config["monitorInteraction"])
         self.ui.downloadModeCombo.setCurrentIndex(config["downloadMode"])
         self.ui.stopModeCombo.setCurrentIndex(config["stopMode"])
         self.ui.proxyCheckBox.setChecked(config["proxyEnabled"])
@@ -502,7 +629,8 @@ class MyConfigWindow(QMainWindow):
         self.ui.proxyPasswordEdit.setText(config["proxyPassword"])
         self.ui.concurrentSpinBox.setValue(config["maxParallel"])
         self.ui.headlessCheckBox.setChecked(config["monitorHeadless"])
-        self.on_deepCheckBox_toggled(config["deep"])
+        self.on_recursionCheckBox_toggled(config["deep"])
+        self.on_attemptCheckBox_toggled(config["monitorTryEnabled"])
         self.on_proxyCheckBox_toggled(config["proxyEnabled"])
 
     def on_applyButton_clicked(self):
@@ -511,8 +639,11 @@ class MyConfigWindow(QMainWindow):
         updated["filename"] = self.ui.filenameEdit.text().strip()
         updated["fileExt"] = self.ui.fileExtCombo.currentIndex()
         updated["fileExtText"] = self.ui.fileExtCombo.currentText().strip()
-        updated["deep"] = self.ui.deepCheckBox.isChecked()
+        updated["deep"] = self.ui.recursionCheckBox.isChecked()
         updated["depth"] = self.ui.deepSpinBox.value()
+        updated["monitorTryEnabled"] = self.ui.attemptCheckBox.isChecked()
+        updated["monitorTries"] = self.ui.attemptSpinBox.value()
+        updated["monitorInteraction"] = self.ui.interactionCheckBox.isChecked()
         updated["downloadList"] = True
         updated["downloadMode"] = self.ui.downloadModeCombo.currentIndex()
         updated["downloadModeText"] = self.ui.downloadModeCombo.currentText().strip()
@@ -528,6 +659,48 @@ class MyConfigWindow(QMainWindow):
         self.Config.data = normalize_config_dict(updated)
         self.Config.write()
         self.loadConfig()
+
+    def on_savePresetButton_clicked(self):
+        preset_dir = self._ensure_preset_dir()
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        default_name = f"{timestamp}.json"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存下载预设",
+            os.path.join(preset_dir, default_name),
+            "JSON Files (*.json)",
+        )
+        file_path = file_path.strip()
+        if file_path == "":
+            return
+        payload = self._collect_download_preset()
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=4)
+            print(f"preset saved: {file_path}")
+        except Exception as exc:
+            print(f"preset save failed: {exc}")
+
+    def on_loadPresetButton_clicked(self):
+        preset_dir = self._ensure_preset_dir()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "加载下载预设",
+            preset_dir,
+            "JSON Files (*.json)",
+        )
+        file_path = file_path.strip()
+        if file_path == "":
+            return
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict) and isinstance(payload.get("Config"), dict):
+                payload = payload["Config"]
+            self._apply_download_preset(payload)
+            print(f"preset loaded: {file_path}")
+        except Exception as exc:
+            print(f"preset load failed: {exc}")
 
     def on_confirmButton_clicked(self):
         self.on_applyButton_clicked()
@@ -619,6 +792,9 @@ class MyWindow(QMainWindow):
                 "proxyUser": run_config["proxyUser"],
                 "proxyPassword": run_config["proxyPassword"],
                 "maxParallel": run_config["maxParallel"],
+                "monitorTryEnabled": run_config.get("monitorTryEnabled", True),
+                "monitorTries": run_config.get("monitorTries", 3),
+                "monitorInteraction": run_config.get("monitorInteraction", True),
                 "monitorHeadless": run_config["monitorHeadless"],
                 "monitorRulesPath": run_config.get("monitorRulesPath", ""),
                 "completed": config.completed,
@@ -660,6 +836,9 @@ class MyWindow(QMainWindow):
             "proxyUser": config["proxyUser"],
             "proxyPassword": config["proxyPassword"],
             "maxParallel": config["maxParallel"],
+            "monitorTryEnabled": config.get("monitorTryEnabled", True),
+            "monitorTries": config.get("monitorTries", 3),
+            "monitorInteraction": config.get("monitorInteraction", True),
             "monitorHeadless": config["monitorHeadless"],
             "monitorRulesPath": config.get("monitorRulesPath", ""),
         }

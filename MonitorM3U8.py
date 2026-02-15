@@ -76,6 +76,35 @@ class MonitorM3U8:
         text = str(value).strip() if value is not None else ""
         return [text] if text else []
 
+    @staticmethod
+    def _normalize_depth_value(depth, deep_enabled=True):
+        if not deep_enabled:
+            return 0
+        if isinstance(depth, str):
+            text = depth.strip().lower()
+            alias_map = {
+                "off": 0,
+                "none": 0,
+                "disabled": 0,
+                "lite": 1,
+                "light": 1,
+                "basic": 1,
+                "simple": 1,
+                "standard": 2,
+                "normal": 2,
+                "default": 2,
+                "deep": 3,
+                "full": 3,
+                "aggressive": 3,
+            }
+            if text in alias_map:
+                return alias_map[text]
+        try:
+            number = int(depth)
+        except (TypeError, ValueError):
+            return 0
+        return number
+
     def __init__(self, URL, deep=True, depth=2, proxy_config=None, monitor_config=None):
         self.timer = TimerTimer(1, self.TimerPrint)
         self.URL = URL
@@ -84,11 +113,13 @@ class MonitorM3U8:
         self.page_candidates = set()
         self.url_hints = {}
         self.lock = threading.Lock()
-        self.depth = 0 if not deep else depth
+        self.depth = self._normalize_depth_value(depth, deep)
         self.depth = self.depth if 0 <= self.depth <= 3 else 0
         self.proxy_config = self._normalize_proxy_config(proxy_config)
         self.monitor_config = self._normalize_monitor_config(monitor_config)
         self.headless = self.monitor_config["headless"]
+        self.interaction_enabled = self.monitor_config["interaction_enabled"]
+        self.monitor_tries = self.monitor_config["tries"]
         self.monitor_headers = self._build_monitor_headers()
         self.last_monitor_error = ""
         self.last_blocked_by_client = False
@@ -139,15 +170,21 @@ class MonitorM3U8:
         if env_headless_value is not None:
             headless = env_headless_value
 
-        rules_path = str(
-            data.get("rules_path")
-            or data.get("rulesPath")
-            or data.get("monitorRulesPath")
-            or ""
-        ).strip()
+        interaction_enabled = MonitorM3U8._to_bool(data.get("interaction_enabled"), True)
+
+        tries_value = data.get("tries", 3)
+        try:
+            tries = int(tries_value)
+        except (TypeError, ValueError):
+            tries = 3
+        tries = max(1, min(tries, 9))
+
+        rules_path = str(data.get("rules_path") or "").strip()
 
         return {
             "headless": headless,
+            "interaction_enabled": interaction_enabled,
+            "tries": tries,
             "rules_path": rules_path,
         }
 
@@ -1028,9 +1065,6 @@ class MonitorM3U8:
         if self._is_m3u8_url(response_url):
             self._add_m3u8_candidate(response_url, referer=referer or self.URL)
 
-        if self.depth not in [2, 3]:
-            return
-
         if self.depth == 3 and status in [301, 302, 303, 307, 308]:
             redirect_to = headers.get("location", "")
             self._add_page_candidate(redirect_to, base_url=response_url)
@@ -1197,14 +1231,59 @@ class MonitorM3U8:
         self.session_hints["cookies"] = self._merge_cookies(self.session_hints.get("cookies", []), cookies)
 
     @staticmethod
-    def _action_enabled_for_interaction_stage(action, interaction_stage):
+    def _action_enabled_for_interaction_stage(action, interaction_stage, attempt=1, tries=1):
         if not isinstance(action, dict):
             return False
         args = action.get("args", {})
         args_when = args.get("when", "all") if isinstance(args, dict) else "all"
         when = str(action.get("when", args_when)).strip().lower()
-        if when in {"", "all"}:
+        if when in {"", "all", "*"}:
             return True
+        if when in {"none", "never", "skip"}:
+            return False
+
+        attempt_num = max(1, int(attempt) if isinstance(attempt, (int, float)) else 1)
+        tries_num = max(1, int(tries) if isinstance(tries, (int, float)) else 1)
+
+        alias_map = {
+            "first": "attempt=1",
+            "init": "attempt=1",
+            "initial": "attempt=1",
+            "start": "attempt=1",
+            "startup": "attempt=1",
+            "retry": "attempt>=2",
+            "retries": "attempt>=2",
+            "again": "attempt>=2",
+            "last": "attempt=last",
+            "final": "attempt=last",
+            "end": "attempt=last",
+        }
+        when = alias_map.get(when, when)
+
+        if when.startswith("attempt"):
+            expr = when.replace("attempt", "", 1).strip()
+            for op in ("==", ">=", "<=", ">", "<", "="):
+                if expr.startswith(op):
+                    raw_value = expr[len(op) :].strip()
+                    if raw_value in {"last", "final", "end"}:
+                        value = tries_num
+                    else:
+                        try:
+                            value = int(raw_value)
+                        except (TypeError, ValueError):
+                            return True
+                    if op in {"=", "=="}:
+                        return attempt_num == value
+                    if op == ">":
+                        return attempt_num > value
+                    if op == ">=":
+                        return attempt_num >= value
+                    if op == "<":
+                        return attempt_num < value
+                    if op == "<=":
+                        return attempt_num <= value
+                    return True
+
         if when == "first":
             return interaction_stage <= 1
         if when == "retry":
@@ -1521,13 +1600,18 @@ class MonitorM3U8:
         except Exception as exc:
             print(f"\tmonitor rule action failed ({action_type}): {exc}")
 
-    def _try_trigger_player(self, page, interaction_stage=1):
+    def _try_trigger_player(self, page, interaction_stage=1, attempt=1, tries=1):
         stable_url = self._normalize_url(page.url) or self.URL
         actions = list(self.active_interaction_rule.get("actions", []))
         if len(actions) == 0:
             return
         for action in actions:
-            if not self._action_enabled_for_interaction_stage(action, interaction_stage):
+            if not self._action_enabled_for_interaction_stage(
+                action,
+                interaction_stage,
+                attempt=attempt,
+                tries=tries,
+            ):
                 continue
             self._run_configured_interaction_action(page, action, stable_url)
         self._extract_candidates_from_page(page)
@@ -1545,7 +1629,7 @@ class MonitorM3U8:
                 raise last_error
             raise RuntimeError("failed to launch browser")
 
-        def __monitor_single(playwright_driver, interaction_stage=1):
+        def __monitor_single(playwright_driver, interaction_stage=1, attempt=1, tries=1):
             launch_args = [
                 "--disable-blink-features=AutomationControlled",
                 "--autoplay-policy=no-user-gesture-required",
@@ -1622,8 +1706,13 @@ class MonitorM3U8:
                     pass
 
                 self._extract_candidates_from_page(page)
-                if self.depth in [2, 3]:
-                    self._try_trigger_player(page, interaction_stage=interaction_stage)
+                if self.interaction_enabled:
+                    self._try_trigger_player(
+                        page,
+                        interaction_stage=interaction_stage,
+                        attempt=attempt,
+                        tries=tries,
+                    )
 
                 if self.depth == 3:
                     self._collect_recursive_candidates(page)
@@ -1649,18 +1738,21 @@ class MonitorM3U8:
 
         print(f"\n\t****monitor started****\nURL={self.URL}")
         print(f"\theadless={self.headless}; depth={self.depth}")
+        print(f"\tinteraction={self.interaction_enabled}; tries={self.monitor_tries}")
         configured_actions_count = len(self.active_interaction_rule.get("actions", []))
-        if configured_actions_count > 0:
+        if self.interaction_enabled and configured_actions_count > 0:
             print(
                 f"\tinteraction rules active="
                 f"{self.active_interaction_rule.get('name', 'rule')} "
                 f"actions={configured_actions_count}"
             )
-        elif self.active_interaction_rule.get("source", "") != "":
+        elif self.interaction_enabled and self.active_interaction_rule.get("source", "") != "":
             print(
                 f"\tinteraction rules loaded from {self.active_interaction_rule['source']}, "
                 f"but no matching actions for this URL"
             )
+        elif not self.interaction_enabled:
+            print("\tinteraction disabled by config")
         if self.proxy_config["enabled"]:
             print(
                 f"\t****proxy****\n"
@@ -1668,12 +1760,12 @@ class MonitorM3U8:
                 f"user={self.proxy_config['username'] or '(none)'}"
             )
 
-        tries = 3 if self.depth in [0, 2] else 5
+        tries = self.monitor_tries
         with sync_playwright() as p:
             for attempt in range(tries):
                 before = len(self.possible)
                 interaction_stage = 0
-                if self.depth in [2, 3]:
+                if self.interaction_enabled:
                     interaction_stage = 1 if attempt == 0 else 2
 
                 print(
@@ -1685,6 +1777,8 @@ class MonitorM3U8:
                     __monitor_single(
                         p,
                         interaction_stage=interaction_stage,
+                        attempt=attempt + 1,
+                        tries=tries,
                     )
                 except Exception as exc:
                     self.last_monitor_error = str(exc)

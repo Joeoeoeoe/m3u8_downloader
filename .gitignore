@@ -9,3 +9,4 @@ Data/
 Config.json
 ffmpeg.exe
 temporary/**
+config/**

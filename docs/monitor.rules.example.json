@@ -40,7 +40,9 @@
                     ],
                     "wait_for_candidates_ms": 1200
                 }
-            },
+            }
+        ],
+        "monitor_final_pass": [
             {
                 "type": "mouse_click",
                 "args": {
@@ -90,9 +92,16 @@
             },
             {
                 "type": "chain",
-                "when": "retry",
+                "when": "attempt>=2",
                 "args": {
                     "name": "monitor_retry_pass"
+                }
+            },
+            {
+                "type": "chain",
+                "when": "last",
+                "args": {
+                    "name": "monitor_final_pass"
                 }
             },
             {

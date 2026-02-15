@@ -36,6 +36,13 @@ class JsonProcessor:
             # json文件内容格式错误 / json文件路径错误
             print(f'{self.filePath}: json file error: {e}')
             if self.cover:
+                if os.path.exists(self.filePath):
+                    broken_path = f"{self.filePath}.broken-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                    try:
+                        os.replace(self.filePath, broken_path)
+                        print(f'json file backup: {broken_path}')
+                    except Exception as backup_error:
+                        print(f'json file backup failed: {backup_error}')
                 self.data = dict()
                 self.write()
                 print(f'json file is set/reset to NULL')
@@ -70,7 +77,18 @@ class JsonProcessor:
 
 class ConfigJson(JsonProcessor):
     def __init__(self):
-        filePath = os.path.join(os.getcwd(), 'Config.json')
+        config_dir = os.path.join(os.getcwd(), 'config')
+        preset_dir = os.path.join(config_dir, 'preset')
+        os.makedirs(preset_dir, exist_ok=True)
+        legacy_path = os.path.join(os.getcwd(), 'Config.json')
+        if os.path.exists(legacy_path):
+            legacy_broken = f"{legacy_path}.broken-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            try:
+                os.replace(legacy_path, legacy_broken)
+                print(f'legacy config backup: {legacy_broken}')
+            except Exception as legacy_error:
+                print(f'legacy config backup failed: {legacy_error}')
+        filePath = os.path.join(config_dir, 'config.json')
         super().__init__(filePath)
 
     def clear(self):
