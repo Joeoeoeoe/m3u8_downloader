@@ -375,51 +375,53 @@ class Worker(QThread):
             else:
                 parser = SimpleUrlParser()
                 url_template, replacements_data, placeholders = parser.parse_input_string(url_input)
-                print(f"URL Template: {url_template}")
-                print(f"Replacements Data: {replacements_data}")
-                print(f"Placeholders: {placeholders}")
                 urls_and_strings = parser.generate_urls_with_match_strings(url_template, replacements_data, placeholders)
-                print("Generated URLs:")
-                for url, match_str in urls_and_strings:
-                    print(f"URL: {url}, Match: {match_str}")
-                print("-" * 30)
+                total_targets = len(urls_and_strings)
+                print(f"[task] parsed input: targets={total_targets}")
+                preview_count = min(5, total_targets)
+                for idx, (url, match_str) in enumerate(urls_and_strings[:preview_count], start=1):
+                    suffix = f" match={match_str}" if match_str != "" else ""
+                    print(f"[task] target {idx}/{total_targets}: {url}{suffix}")
+                if total_targets > preview_count:
+                    print(f"[task] ... {total_targets - preview_count} more targets")
 
-            def run_url(url, this_filename):
+            def run_url(url, this_filename, task_index, task_total):
                 current_urls = []
                 monitor_session_hints = {}
                 if url == "" and self.monitor:
                     return
 
-                print("\t\t\t********INPUT********")
-                print(f"\t\t****Url={url}****")
-                print(f"\t\t****Folder={folder}****")
-                print(f"\t\t****Filename={this_filename}****")
-                print(f"\t\t****FileExtention={file_ext_text}****")
-                print(f"\t\t****?recursion enabled={recursion_enabled}****")
-                print(f"\t\t    >> recursion depth = {recursion_depth}")
-                print(f"\t\t****?save download list={download_list}")
-                print(f"\t\t****Download mode={download_mode_text}****")
-                print(f"\t\t****Max parallel={max_parallel}****")
-                print(f"\t\t****Proxy={'ON' if proxy_config['enabled'] else 'OFF'}****")
-                print(f"\t\t****Monitor headless={monitor_config['headless']}****")
-                print(f"\t\t****Monitor interaction={monitor_config.get('interaction_enabled', True)}****")
-                print(f"\t\t****Monitor tries={monitor_config.get('tries', 1)}****")
+                print("")
+                print(f"[task {task_index}/{task_total}] start")
+                print(f"[task] url={url}")
+                print(f"[task] output={os.path.join(folder, this_filename + file_ext_text)}")
+                print(
+                    f"[task] mode={download_mode_text} recursion={recursion_enabled} "
+                    f"depth={recursion_depth} save_list={download_list} parallel={max_parallel}"
+                )
+                print(
+                    f"[task] monitor headless={monitor_config['headless']} "
+                    f"interaction={monitor_config.get('interaction_enabled', True)} "
+                    f"tries={monitor_config.get('tries', 1)}"
+                )
                 if monitor_config.get("rules_path", "") != "":
-                    print(f"\t\t****Monitor rules path={monitor_config['rules_path']}****")
+                    print(f"[task] monitor rules={monitor_config['rules_path']}")
                 if proxy_config["enabled"]:
                     print(
-                        f"\t\t    >> {proxy_config['address']}:{proxy_config['port']} "
+                        f"[task] proxy=ON {proxy_config['address']}:{proxy_config['port']} "
                         f"user={proxy_config['username'] or '(none)'}"
                     )
+                else:
+                    print("[task] proxy=OFF")
 
                 if not self.monitor:
-                    print(f"\t\t****List mode={list_mode_text}****")
+                    print(f"[task] list mode={list_mode_text}")
                     sys.stdout.flush()  # 手动刷新缓冲区
                     current_urls = list(self.l)
                 else:
                     if ".m3u8" in url:
                         # 给出m3u8的地址，直接开始下载
-                        print("\n\t**m3u8 address is provided; directly download**\n")
+                        print("[task] m3u8 url provided; skip monitor")
                         current_urls = [url]
                         monitor_session_hints = {
                             "source_url": url,
@@ -476,12 +478,13 @@ class Worker(QThread):
                     print("Interrupted Success!")
                     return
 
-                print(f"\t\t****Detected m3u8 count={len(current_urls)}****")
+                print(f"[task] detected m3u8 candidates={len(current_urls)}")
 
                 success_target_map = {0: 0, 1: 1, 2: 5}
                 success_target = success_target_map.get(download_mode, None)
                 successful_videos = 0
                 target_reached = False
+                target_skip_logged = False
 
                 # 所有模式都先完成探测，然后进入下载阶段；
                 # 首个/前5个按“真实成功视频”数量计数，而不是按候选序号截断。
@@ -492,12 +495,19 @@ class Worker(QThread):
 
                     if success_target is not None and successful_videos >= success_target:
                         target_reached = True
+                        if not target_skip_logged and download_mode not in (0,):
+                            print(
+                                f"[task] success target reached ({successful_videos}/{success_target}), "
+                                f"skip remaining downloads"
+                            )
+                            target_skip_logged = True
                         if download_list:
                             d[str(i)] = {"url": i_url, "completed": False}
                         continue
 
                     completed = False
                     if download_mode != 0:
+                        print(f"[download] candidate {i + 1}/{len(current_urls)}")
                         try:
                             x = DownloadM3U8(
                                 folder,
@@ -532,22 +542,29 @@ class Worker(QThread):
                         d[str(i)] = {"url": i_url, "completed": completed}
 
                 if success_target is None:
-                    print(f"\t\t****Downloaded success videos={successful_videos} (mode=all)****")
+                    print(f"[task] downloaded success videos={successful_videos} (mode=all)")
                 elif download_mode == 0:
-                    print("\t\t****Download mode=不下载, skip downloading candidates****")
+                    print("[task] download mode=不下载, skip downloading candidates")
                 else:
                     state = "reached" if target_reached or successful_videos >= success_target else "not reached"
                     print(
-                        f"\t\t****Downloaded success videos={successful_videos}/{success_target} "
-                        f"target {state}****"
+                        f"[task] downloaded success videos={successful_videos}/{success_target} "
+                        f"target {state}"
                     )
 
                 # 保存下载列表
                 if len(current_urls) != 0:
                     DownloadJson(d).write()
 
-            for url, match_str in urls_and_strings:  # 地址范围中的每个url 不是一个url中识别到的所有m3u8视频
-                run_url(url, f"{filename}_{match_str}" if match_str != "" else filename)
+            total_tasks = len(urls_and_strings)
+            for task_index, (url, match_str) in enumerate(urls_and_strings, start=1):
+                # 地址范围中的每个url 不是一个url中识别到的所有m3u8视频
+                run_url(
+                    url,
+                    f"{filename}_{match_str}" if match_str != "" else filename,
+                    task_index,
+                    total_tasks,
+                )
 
         except Exception as e:
             print(f"Error in Worker! {e}")

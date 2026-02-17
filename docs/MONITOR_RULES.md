@@ -121,6 +121,19 @@
 { "type": "chain", "args": { "name": "first_pass" } }
 ```
 
+### 5.1 默认链命名说明（当前内置规则）
+
+- `dismiss_overlays`：先尝试关闭弹窗/遮罩（含常见 close 按钮与 `Escape`）。
+- `probe_player_ready`：等待播放器相关元素出现，随后触发 `play_media` 与一轮播放按钮点击。
+- `kickstart_player_gate`：针对“需先点开始层才会加载真实播放器”的站点，先 `wait_for_selector` 再点击 `start/play` 门禁元素。
+- `monitor_first_pass`：首轮尝试链，动作偏保守，目标是低干扰触发加载。
+- `monitor_retry_pass`：重试链，动作更激进（更多点击/hover/按键/滚动），用于首轮失败后的补救。
+
+`monitor_first_pass` 与 `monitor_retry_pass` 分开不是语法要求，而是策略分层：
+
+- 第一次尝试优先“少动作快速探测”，降低误触。
+- 第二次及以后逐步增强交互强度，覆盖反爬或延迟加载场景。
+
 ## 6. `global`
 
 `global` 字段：
@@ -283,8 +296,47 @@
 
 - `selector`：单个选择器字符串
 - `selectors`：选择器数组
-- 两者可同时出现，程序会合并后使用
-- `$player`：播放器选择器宏，展开为内置常见播放器选择器集合
+- 两者可同时出现，程序会“合并 + 去重 + 保序”后执行
+
+执行语义（重点）：
+
+- 对 `click` / `hover` / `fill`：`selectors` 是“按顺序回退”的关系，可理解为 OR（前一个点不到再试下一个）。
+- 对 `wait_for_selector`：由 `match` 控制
+- `match=any`：OR（任一命中即满足）
+- `match=all`：AND（全部命中才满足）
+- 对 `wait_group`：每个子 action 仍按自身语义判断，组层由 `mode` 决定 `any/all`。
+
+`$player` 宏（当前代码中的完整展开）：
+
+- `video`
+- `audio`
+- `.vjs-big-play-button`
+- `.jw-icon-display`
+- `.jw-icon-playback`
+- `.dplayer-play-icon`
+- `.art-video-player .art-start`
+- `.xgplayer-start`
+- `.xgplayer-play`
+- `.ckplayer .ck-play`
+- `.plyr__control--overlaid`
+- `button[aria-label*='play' i]`
+- `button[title*='play' i]`
+- `button[class*='play' i]`
+- `[data-testid*='play' i]`
+- `[id='start']`
+- `div#start`
+- `div#start.content`
+- `div[id='start'].content`
+- `.start-btn`
+- `.btn-start`
+- `[class*='start' i]`
+- `[id*='start' i]`
+- `[data-role*='start' i]`
+- `.player .play`
+- `.vjs-play-control`
+- `.art-control-play`
+- `.play-button`
+- `.play-btn`
 
 支持标准 CSS 选择器（标签、类、ID、属性选择器都可以）：
 
@@ -347,6 +399,11 @@
 
 - `any`：任一选择器满足 `state` 即算成功
 - `all`：所有选择器都满足 `state` 才算成功
+
+注意：
+
+- `wait_for_selector` 只负责“等待条件成立”，不会自动点击。
+- 如果你的站点是“出现某元素后还要再点一下才出 m3u8”，应显式追加一个 `click` action（通常紧跟在 `wait_for_selector` 后）。
 
 `poll_ms` 语义：
 
@@ -653,12 +710,17 @@
 规则文件用于“如何操作页面”，不控制“是否提取 m3u8”这一核心行为。  
 链接提取始终由监测引擎持续执行。
 
-## 14. 运行日志中的规则命中信息
+## 14. 运行日志与进度
 
-每次监测开始前会打印：
+默认输出（精简模式）会打印：
 
-- 规则文件来源路径
-- 命中站点规则数量
-- 每条命中规则的 `name / host / url_contains / url_regex / actions_count`
+- `start`：URL 与主要配置（headless/tries/interaction）
+- `rules`：规则来源、命中站点数量、激活动作数
+- `attempt x/y start`：当前尝试开始
+- `attempt x/y done`：该次耗时、新增 m3u8 数、累计总数
+- `fallback(requests)`：兜底探测开始/结束与耗时
+- `done`：总耗时、possible/predicted 总数
 
-该日志用于确认规则匹配是否成功。
+若需要更详细的规则命中细节（每条 site 的 `name/host/url_contains/url_regex/actions_count`）：
+
+- 设置环境变量 `M3U8_MONITOR_VERBOSE=1` 后运行。

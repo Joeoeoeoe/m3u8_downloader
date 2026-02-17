@@ -54,9 +54,14 @@
                                     "video",
                                     "audio",
                                     "$player",
-                                    "iframe[src*='player' i]",
+                                    "iframe[src*='play' i]",
+                                    "iframe[src*='video' i]",
                                     ".player",
-                                    ".video-wrap"
+                                    ".video-wrap",
+                                    ".art-video-player",
+                                    ".xgplayer",
+                                    ".jwplayer",
+                                    ".plyr"
                                 ],
                                 "state": "attached",
                                 "match": "any",
@@ -87,8 +92,11 @@
                     "selectors": [
                         "$player",
                         "video",
-                        ".play",
-                        ".play-btn",
+                        ".vjs-big-play-button",
+                        ".jw-icon-display",
+                        ".dplayer-play-icon",
+                        ".xgplayer-start",
+                        ".plyr__control--overlaid",
                         "button[class*='play' i]",
                         "button[aria-label*='play' i]"
                     ],
@@ -111,6 +119,62 @@
                 }
             }
         ],
+        "kickstart_player_gate": [
+            {
+                "type": "wait_for_selector",
+                "args": {
+                    "selectors": [
+                        "div#start.content",
+                        "div[id='start'].content",
+                        "#start",
+                        "[id='start']",
+                        ".start-btn",
+                        ".btn-start",
+                        "[class*='start' i]",
+                        "[id*='start' i]",
+                        "[data-role*='start' i]"
+                    ],
+                    "state": "attached",
+                    "match": "any",
+                    "target": "all",
+                    "timeout_ms": 2400,
+                    "poll_ms": 120
+                }
+            },
+            {
+                "type": "click",
+                "args": {
+                    "selectors": [
+                        "div#start.content",
+                        "div[id='start'].content",
+                        "#start",
+                        "[id='start']",
+                        ".start-btn",
+                        ".btn-start",
+                        "[class*='start' i]",
+                        "[id*='start' i]",
+                        "[data-role*='start' i]",
+                        "$player"
+                    ],
+                    "target": "all",
+                    "repeat": 1,
+                    "wait_min_ms": 160,
+                    "wait_max_ms": 320,
+                    "max_per_selector": 2,
+                    "visible_timeout_ms": 650,
+                    "click_timeout_ms": 1600,
+                    "wait_after_click_min_ms": 100,
+                    "wait_after_click_max_ms": 260
+                }
+            },
+            {
+                "type": "wait",
+                "args": {
+                    "min_ms": 160,
+                    "max_ms": 320
+                }
+            }
+        ],
         "monitor_first_pass": [
             {
                 "type": "chain",
@@ -122,6 +186,12 @@
                 "type": "chain",
                 "args": {
                     "name": "probe_player_ready"
+                }
+            },
+            {
+                "type": "chain",
+                "args": {
+                    "name": "kickstart_player_gate"
                 }
             },
             {
@@ -162,10 +232,14 @@
                             "type": "wait_for_selector",
                             "args": {
                                 "selectors": [
+                                    "$player",
                                     "video",
                                     ".player",
-                                    "$player",
-                                    "iframe"
+                                    ".video-wrap",
+                                    "iframe[src*='play' i]",
+                                    "iframe[src*='video' i]",
+                                    "#start",
+                                    ".start-btn"
                                 ],
                                 "state": "attached",
                                 "match": "any",
@@ -188,14 +262,26 @@
                 "type": "click",
                 "args": {
                     "selectors": [
+                        "div#start.content",
+                        "div[id='start'].content",
+                        "#start",
+                        "[id='start']",
+                        ".start-btn",
+                        ".btn-start",
+                        "[class*='start' i]",
+                        "[id*='start' i]",
+                        "[data-role*='start' i]",
                         "$player",
                         "video",
-                        ".play",
-                        ".play-btn",
+                        ".vjs-big-play-button",
+                        ".jw-icon-display",
+                        ".dplayer-play-icon",
+                        ".xgplayer-start",
+                        ".plyr__control--overlaid",
                         "button[class*='play' i]"
                     ],
                     "target": "all",
-                    "repeat": 1,
+                    "repeat": 2,
                     "wait_min_ms": 260,
                     "wait_max_ms": 520,
                     "max_per_selector": 2,
@@ -253,25 +339,18 @@
     "global": {
         "actions": [
             {
-                "type": "log",
-                "when": "=1",
-                "args": {
-                    "message": "monitor first attempt strategy started"
-                }
-            },
-            {
                 "type": "chain",
-                "when": "=1",
                 "args": {
                     "name": "monitor_first_pass"
-                }
+                },
+                "when": "=1"
             },
             {
                 "type": "chain",
-                "when": ">=2",
                 "args": {
                     "name": "monitor_retry_pass"
-                }
+                },
+                "when": ">=2"
             }
         ]
     },

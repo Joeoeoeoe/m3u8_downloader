@@ -11,24 +11,38 @@ from urllib.parse import parse_qs, unquote, urldefrag, urljoin, urlparse
 import requests
 from playwright.sync_api import sync_playwright
 
-from TimerTimer import TimerTimer
-
 
 class MonitorM3U8:
     PLAYER_SELECTORS = [
         "video",
         "audio",
-        "button[aria-label*='play' i]",
-        "button[title*='play' i]",
-        ".play-button",
-        ".vjs-play-control",
+        ".vjs-big-play-button",
+        ".jw-icon-display",
         ".jw-icon-playback",
         ".dplayer-play-icon",
-        ".art-control-play",
+        ".art-video-player .art-start",
+        ".xgplayer-start",
         ".xgplayer-play",
         ".ckplayer .ck-play",
-        ".player .play",
+        ".plyr__control--overlaid",
+        "button[aria-label*='play' i]",
+        "button[title*='play' i]",
+        "button[class*='play' i]",
         "[data-testid*='play' i]",
+        "[id='start']",
+        "div#start",
+        "div#start.content",
+        "div[id='start'].content",
+        ".start-btn",
+        ".btn-start",
+        "[class*='start' i]",
+        "[id*='start' i]",
+        "[data-role*='start' i]",
+        ".player .play",
+        ".vjs-play-control",
+        ".art-control-play",
+        ".play-button",
+        ".play-btn",
     ]
     DEFAULT_RULES_PATH = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -139,7 +153,6 @@ class MonitorM3U8:
         proxy_config=None,
         monitor_config=None,
     ):
-        self.timer = TimerTimer(1, self.TimerPrint)
         self.URL = URL
         self.possible = set()
         self.predicted = set()
@@ -157,6 +170,7 @@ class MonitorM3U8:
         self.interaction_enabled = self.monitor_config["interaction_enabled"]
         self.monitor_tries = self.monitor_config["tries"]
         self.monitor_headers = self._build_monitor_headers()
+        self.verbose_log = self._to_bool(os.getenv("M3U8_MONITOR_VERBOSE", ""), False)
         self.last_monitor_error = ""
         self.last_blocked_by_client = False
         self.session_hints = {
@@ -245,6 +259,21 @@ class MonitorM3U8:
         }
         return {k: v for k, v in headers.items() if v}
 
+    @staticmethod
+    def _fmt_seconds(seconds):
+        try:
+            value = max(0.0, float(seconds))
+        except (TypeError, ValueError):
+            value = 0.0
+        return f"{value:.1f}s"
+
+    def _log_monitor(self, message):
+        print(f"\t[monitor] {message}")
+
+    def _log_verbose(self, message):
+        if self.verbose_log:
+            self._log_monitor(message)
+
     def _resolve_rules_path(self, raw_path):
         path = str(raw_path or "").strip() or self.DEFAULT_RULES_PATH
         expanded = os.path.expanduser(os.path.expandvars(path))
@@ -317,9 +346,14 @@ class MonitorM3U8:
                                             "video",
                                             "audio",
                                             "$player",
-                                            "iframe[src*='player' i]",
+                                            "iframe[src*='play' i]",
+                                            "iframe[src*='video' i]",
                                             ".player",
                                             ".video-wrap",
+                                            ".art-video-player",
+                                            ".xgplayer",
+                                            ".jwplayer",
+                                            ".plyr",
                                         ],
                                         "state": "attached",
                                         "match": "any",
@@ -350,8 +384,11 @@ class MonitorM3U8:
                             "selectors": [
                                 "$player",
                                 "video",
-                                ".play",
-                                ".play-btn",
+                                ".vjs-big-play-button",
+                                ".jw-icon-display",
+                                ".dplayer-play-icon",
+                                ".xgplayer-start",
+                                ".plyr__control--overlaid",
                                 "button[class*='play' i]",
                                 "button[aria-label*='play' i]",
                             ],
@@ -374,6 +411,62 @@ class MonitorM3U8:
                         },
                     },
                 ],
+                "kickstart_player_gate": [
+                    {
+                        "type": "wait_for_selector",
+                        "args": {
+                            "selectors": [
+                                "div#start.content",
+                                "div[id='start'].content",
+                                "#start",
+                                "[id='start']",
+                                ".start-btn",
+                                ".btn-start",
+                                "[class*='start' i]",
+                                "[id*='start' i]",
+                                "[data-role*='start' i]",
+                            ],
+                            "state": "attached",
+                            "match": "any",
+                            "target": "all",
+                            "timeout_ms": 2400,
+                            "poll_ms": 120,
+                        },
+                    },
+                    {
+                        "type": "click",
+                        "args": {
+                            "selectors": [
+                                "div#start.content",
+                                "div[id='start'].content",
+                                "#start",
+                                "[id='start']",
+                                ".start-btn",
+                                ".btn-start",
+                                "[class*='start' i]",
+                                "[id*='start' i]",
+                                "[data-role*='start' i]",
+                                "$player",
+                            ],
+                            "target": "all",
+                            "repeat": 1,
+                            "wait_min_ms": 160,
+                            "wait_max_ms": 320,
+                            "max_per_selector": 2,
+                            "visible_timeout_ms": 650,
+                            "click_timeout_ms": 1600,
+                            "wait_after_click_min_ms": 100,
+                            "wait_after_click_max_ms": 260,
+                        },
+                    },
+                    {
+                        "type": "wait",
+                        "args": {
+                            "min_ms": 160,
+                            "max_ms": 320,
+                        },
+                    },
+                ],
                 "monitor_first_pass": [
                     {
                         "type": "chain",
@@ -385,6 +478,12 @@ class MonitorM3U8:
                         "type": "chain",
                         "args": {
                             "name": "probe_player_ready",
+                        },
+                    },
+                    {
+                        "type": "chain",
+                        "args": {
+                            "name": "kickstart_player_gate",
                         },
                     },
                     {
@@ -421,10 +520,14 @@ class MonitorM3U8:
                                     "type": "wait_for_selector",
                                     "args": {
                                         "selectors": [
+                                            "$player",
                                             "video",
                                             ".player",
-                                            "$player",
-                                            "iframe",
+                                            ".video-wrap",
+                                            "iframe[src*='play' i]",
+                                            "iframe[src*='video' i]",
+                                            "#start",
+                                            ".start-btn",
                                         ],
                                         "state": "attached",
                                         "match": "any",
@@ -447,14 +550,26 @@ class MonitorM3U8:
                         "type": "click",
                         "args": {
                             "selectors": [
+                                "div#start.content",
+                                "div[id='start'].content",
+                                "#start",
+                                "[id='start']",
+                                ".start-btn",
+                                ".btn-start",
+                                "[class*='start' i]",
+                                "[id*='start' i]",
+                                "[data-role*='start' i]",
                                 "$player",
                                 "video",
-                                ".play",
-                                ".play-btn",
+                                ".vjs-big-play-button",
+                                ".jw-icon-display",
+                                ".dplayer-play-icon",
+                                ".xgplayer-start",
+                                ".plyr__control--overlaid",
                                 "button[class*='play' i]",
                             ],
                             "target": "all",
-                            "repeat": 1,
+                            "repeat": 2,
                             "wait_min_ms": 260,
                             "wait_max_ms": 520,
                             "max_per_selector": 2,
@@ -507,13 +622,6 @@ class MonitorM3U8:
             "global": {
                 "actions": [
                     {
-                        "type": "log",
-                        "when": "=1",
-                        "args": {
-                            "message": "monitor first attempt strategy started",
-                        },
-                    },
-                    {
                         "type": "chain",
                         "args": {
                             "name": "monitor_first_pass",
@@ -546,9 +654,9 @@ class MonitorM3U8:
         default_payload = self._builtin_default_rules()
         try:
             self._safe_write_json(rules_path, default_payload)
-            print(f"\tmonitor rules created: {rules_path}")
+            self._log_monitor(f"rules file created: {rules_path}")
         except Exception as exc:
-            print(f"\tmonitor rules create failed: {exc}")
+            self._log_monitor(f"rules file create failed: {exc}")
 
     def _repair_rules_file(self, rules_path):
         default_payload = self._builtin_default_rules()
@@ -556,15 +664,15 @@ class MonitorM3U8:
             if os.path.exists(rules_path):
                 backup_path = f"{rules_path}.broken-{time.strftime('%Y%m%d-%H%M%S')}"
                 os.replace(rules_path, backup_path)
-                print(f"\tmonitor rules backup: {backup_path}")
+                self._log_monitor(f"rules backup: {backup_path}")
         except Exception as exc:
-            print(f"\tmonitor rules backup skipped: {exc}")
+            self._log_monitor(f"rules backup skipped: {exc}")
 
         try:
             self._safe_write_json(rules_path, default_payload)
-            print(f"\tmonitor rules reset: {rules_path}")
+            self._log_monitor(f"rules reset: {rules_path}")
         except Exception as exc:
-            print(f"\tmonitor rules reset failed: {exc}")
+            self._log_monitor(f"rules reset failed: {exc}")
         return default_payload
 
     def _normalize_action_list(self, actions):
@@ -1005,7 +1113,7 @@ class MonitorM3U8:
 
     def _expand_action_chains(self, actions, chains, trace=None, depth=0):
         if depth > 10:
-            print("\tmonitor rules action chain depth exceeded")
+            self._log_monitor("rules action chain depth exceeded")
             return []
 
         if trace is None:
@@ -1024,16 +1132,13 @@ class MonitorM3U8:
             args = action.get("args", {})
             chain_name = str(args.get("name", "") if isinstance(args, dict) else "").strip()
             if chain_name == "":
-                print("\tmonitor rules chain action skipped: missing name")
+                self._log_monitor("rules chain action skipped: missing name")
                 continue
             if chain_name in trace:
-                print(
-                    f"\tmonitor rules chain skipped: circular reference "
-                    f"{' -> '.join(trace + [chain_name])}"
-                )
+                self._log_monitor(f"rules chain skipped: circular reference {' -> '.join(trace + [chain_name])}")
                 continue
             if chain_name not in chains:
-                print(f"\tmonitor rules chain skipped: not found '{chain_name}'")
+                self._log_monitor(f"rules chain skipped: not found '{chain_name}'")
                 continue
 
             nested_actions = self._expand_action_chains(
@@ -1093,7 +1198,7 @@ class MonitorM3U8:
                 payload = json.load(f)
             self._validate_monitor_rules_payload(payload)
         except Exception as exc:
-            print(f"\tmonitor rules load failed: {exc}")
+            self._log_monitor(f"rules load failed: {exc}")
             payload = self._repair_rules_file(rules_path)
 
         default_global = {
@@ -1465,8 +1570,10 @@ class MonitorM3U8:
 
     def _fallback_probe_with_requests(self):
         if len(self.possible) > 0:
-            return
-        print("\trequests fallback probe started")
+            return 0
+        before = len(self.possible)
+        started_at = time.perf_counter()
+        self._log_monitor("fallback(requests) start")
         script_probe_limit = 10
         try:
             session = requests.Session()
@@ -1505,9 +1612,15 @@ class MonitorM3U8:
                     else:
                         self._add_page_candidate(found_url)
         except Exception as exc:
-            print(f"\trequests fallback probe failed: {exc}")
+            self._log_monitor(f"fallback(requests) failed: {exc}")
         finally:
-            print("\trequests fallback probe done")
+            elapsed = time.perf_counter() - started_at
+            added = max(0, len(self.possible) - before)
+            self._log_monitor(
+                f"fallback(requests) done in {self._fmt_seconds(elapsed)} "
+                f"new_m3u8={added} total={len(self.possible)}"
+            )
+        return max(0, len(self.possible) - before)
 
     @staticmethod
     def _is_wrapper_candidate(url):
@@ -2397,7 +2510,7 @@ class MonitorM3U8:
     def _action_log(self, page, action, stable_url, before_count):
         message = str(self._action_arg(action, "message", "")).strip()
         if message:
-            print(f"\tmonitor rule action: {message}")
+            self._log_verbose(f"rule log: {message}")
 
     def _run_configured_interaction_action(self, page, action, stable_url):
         if not isinstance(action, dict):
@@ -2408,14 +2521,14 @@ class MonitorM3U8:
             return
         handler = self.action_handlers.get(action_type)
         if handler is None:
-            print(f"\tmonitor rule action skipped: unknown type={action_type}")
+            self._log_monitor(f"rule action skipped: unknown type={action_type}")
             return
 
         before = len(self.possible)
         try:
             handler(page, action, stable_url, before)
         except Exception as exc:
-            print(f"\tmonitor rule action failed ({action_type}): {exc}")
+            self._log_monitor(f"rule action failed ({action_type}): {exc}")
 
     def _try_trigger_player(self, page, interaction_stage=1, attempt=1, tries=1):
         stable_url = self._normalize_url(page.url) or self.URL
@@ -2456,9 +2569,11 @@ class MonitorM3U8:
                 "--disable-extensions",
                 "--disable-component-extensions-with-background-pages",
             ]
-            if not chromium_executable_logged:
+            if self.verbose_log and not chromium_executable_logged:
                 try:
-                    print(f"\tplaywright chromium executable={playwright_driver.chromium.executable_path}")
+                    self._log_verbose(
+                        f"playwright chromium executable={playwright_driver.chromium.executable_path}"
+                    )
                 except Exception:
                     pass
                 chromium_executable_logged = True
@@ -2478,7 +2593,7 @@ class MonitorM3U8:
             context = None
             try:
                 browser = __launch_browser(playwright_driver, launch_kwargs)
-                print("\tlaunch browser actual=chromium")
+                self._log_verbose("launch browser actual=chromium")
                 context = browser.new_context(
                     user_agent=self.monitor_headers.get("user-agent", self._default_user_agent()),
                     locale="zh-CN",
@@ -2558,80 +2673,100 @@ class MonitorM3U8:
                     except Exception:
                         pass
 
-        print(f"\n\t****monitor started****\nURL={self.URL}")
-        print(f"\theadless={self.headless}; recursion_depth={self.recursion_depth}")
-        print(f"\tinteraction={self.interaction_enabled}; tries={self.monitor_tries}")
-        configured_actions_count = len(self.active_interaction_rule.get("actions", []))
-        print(
-            f"\tinteraction rules source="
-            f"{self.active_interaction_rule.get('source', '(builtin/default)')}"
+        monitor_started_at = time.perf_counter()
+        self._log_monitor(f"start url={self.URL}")
+        self._log_monitor(
+            f"config headless={self.headless} recursion_depth={self.recursion_depth} "
+            f"interaction={self.interaction_enabled} tries={self.monitor_tries}"
         )
-        print(
-            f"\tinteraction rules matched_sites="
-            f"{len(self.active_interaction_rule.get('matched_sites', []))}"
+        configured_actions_count = len(self.active_interaction_rule.get("actions", []))
+        self._log_monitor(
+            f"rules source={self.active_interaction_rule.get('source', '(builtin/default)')} "
+            f"matched_sites={len(self.active_interaction_rule.get('matched_sites', []))} "
+            f"active_actions={configured_actions_count}"
         )
         for site_info in self.active_interaction_rule.get("matched_site_details", []):
-            print(
-                f"\t\t- site={site_info.get('name', 'site')} "
+            self._log_verbose(
+                f"matched site={site_info.get('name', 'site')} "
                 f"actions={site_info.get('actions_count', 0)} "
                 f"host={site_info.get('host_patterns', [])} "
                 f"url_contains={site_info.get('url_contains', [])} "
                 f"url_regex={site_info.get('url_regex', '')}"
             )
         if self.interaction_enabled and configured_actions_count > 0:
-            print(
-                f"\tinteraction rules active="
-                f"{self.active_interaction_rule.get('name', 'rule')} "
+            self._log_monitor(
+                f"interaction active={self.active_interaction_rule.get('name', 'rule')} "
                 f"actions={configured_actions_count}"
             )
         elif self.interaction_enabled and self.active_interaction_rule.get("source", "") != "":
-            print(
-                f"\tinteraction rules loaded from {self.active_interaction_rule['source']}, "
-                f"but no matching actions for this URL"
+            self._log_monitor(
+                f"interaction rules loaded but no matching action for url "
+                f"({self.active_interaction_rule['source']})"
             )
         elif not self.interaction_enabled:
-            print("\tinteraction disabled by config")
+            self._log_monitor("interaction disabled by config")
         if self.proxy_config["enabled"]:
-            print(
-                f"\t****proxy****\n"
-                f"server={self.proxy_config['address']}:{self.proxy_config['port']}\n"
+            self._log_monitor(
+                f"proxy=on server={self.proxy_config['address']}:{self.proxy_config['port']} "
                 f"user={self.proxy_config['username'] or '(none)'}"
             )
+        else:
+            self._log_monitor("proxy=off")
 
         tries = self.monitor_tries
         with sync_playwright() as p:
             for attempt in range(tries):
+                attempt_no = attempt + 1
+                attempt_started_at = time.perf_counter()
                 before = len(self.possible)
                 interaction_stage = 0
                 if self.interaction_enabled:
                     interaction_stage = 1 if attempt == 0 else 2
 
-                print(
-                    f"\tmonitor attempt {attempt + 1}/{tries} "
-                    f"interaction={interaction_stage} "
-                    f"channel=chromium-only"
+                stage_name = "first-pass" if interaction_stage == 1 else "retry-pass"
+                if interaction_stage == 0:
+                    stage_name = "disabled"
+                self._log_monitor(
+                    f"attempt {attempt_no}/{tries} start "
+                    f"strategy={stage_name} channel=chromium"
                 )
                 try:
                     __monitor_single(
                         p,
                         interaction_stage=interaction_stage,
-                        attempt=attempt + 1,
+                        attempt=attempt_no,
                         tries=tries,
                     )
                 except Exception as exc:
                     self.last_monitor_error = str(exc)
-                    print(f"\tmonitor attempt {attempt + 1}/{tries} failed: {exc}")
+                    elapsed = time.perf_counter() - attempt_started_at
+                    self._log_monitor(
+                        f"attempt {attempt_no}/{tries} failed in {self._fmt_seconds(elapsed)}: {exc}"
+                    )
                     continue
 
+                after = len(self.possible)
+                new_candidates = max(0, after - before)
+                elapsed = time.perf_counter() - attempt_started_at
+                self._log_monitor(
+                    f"attempt {attempt_no}/{tries} done in {self._fmt_seconds(elapsed)} "
+                    f"new_m3u8={new_candidates} total={after}"
+                )
                 if self.last_blocked_by_client:
-                    print("\tblocked-by-client detected, next attempt will switch strategy")
+                    self._log_monitor("blocked-by-client detected; continue with retry strategy")
 
         if len(self.possible) == 0 and self.last_monitor_error != "":
-            print(f"\tmonitor ended with last error: {self.last_monitor_error}")
+            self._log_monitor(f"ended with last error: {self.last_monitor_error}")
+        fallback_added = 0
         if len(self.possible) == 0:
-            self._fallback_probe_with_requests()
+            fallback_added = self._fallback_probe_with_requests()
 
-        print("\n\n\t****monitor done****")
+        monitor_elapsed = time.perf_counter() - monitor_started_at
+        self._log_monitor(
+            f"done in {self._fmt_seconds(monitor_elapsed)} "
+            f"possible={len(self.possible)} predicted={len(self.predicted)} "
+            f"fallback_new={fallback_added}"
+        )
         return list(self._ordered_m3u8_lists())
 
     def _rank_recursive_candidates(self):
@@ -2668,7 +2803,9 @@ class MonitorM3U8:
             queued.add(target)
         processed_nodes = 0
 
-        print("\n\n\t\t********controlled recursion started********")
+        self._log_monitor(
+            f"recursion start depth={self.recursion_depth} seeds={len(queue)} max_nodes={max_nodes}"
+        )
         while queue and processed_nodes < max_nodes:
             target, level = queue.pop(0)
             if level > self.recursion_depth:
@@ -2684,7 +2821,7 @@ class MonitorM3U8:
                     continue
                 cross_site_used += 1
 
-            print(f"\t\t>> recurse page: {target}")
+            self._log_verbose(f"recursion node level={level} url={target}")
             child = MonitorM3U8(
                 target,
                 recursion_enabled=True,
@@ -2711,14 +2848,21 @@ class MonitorM3U8:
                     queue.append((next_target, level + 1))
                     queued.add(next_target)
 
-        print("\n\n\t\t********controlled recursion done********")
+        self._log_monitor(
+            f"recursion done processed={processed_nodes} queued_left={len(queue)} "
+            f"cross_site_used={cross_site_used}"
+        )
         return possible, predicted
 
-    def TimerPrint(self, cnt):
-        if cnt <= 0:
+    def _print_candidate_preview(self, label, urls, limit=3):
+        values = list(urls or [])
+        if len(values) == 0:
             return
-        if cnt == 1 or cnt % 5 == 0:
-            print(f"\twaiting {cnt}s for resources to find...")
+        count = min(len(values), max(1, int(limit)))
+        for item in values[:count]:
+            print(f"\t{label} m3u8 = {item}")
+        if len(values) > count:
+            print(f"\t{label} m3u8 = ... (+{len(values) - count} more)")
 
     def get_session_hints(self):
         return {
@@ -2730,26 +2874,26 @@ class MonitorM3U8:
         }
 
     def simple(self, run_recursive=True):
-        self.timer.ResetCounter()
-        self.timer.StartTimer()
         possible, predicted = self.MonitorUrl()
-        self.timer.StopTimer()
-        if self.timer.call_count > 0:
-            print(f"\tmonitor elapsed ~{self.timer.call_count}s")
-
         if possible == [] and predicted == []:
-            print("find no resource to download\n\n")
+            self._log_monitor("no resource found for current url")
         else:
-            [print(f"possible m3u8\t= {i}") for i in list(possible)]
-            [print(f"predicted m3u8\t= {i}") for i in list(predicted)]
-            print("\n\n")
+            self._log_monitor(
+                f"resource summary possible={len(possible)} predicted={len(predicted)}"
+            )
+            self._print_candidate_preview("possible", possible)
+            self._print_candidate_preview("predicted", predicted)
 
         if run_recursive and self.recursion_depth > 1:
             possible, predicted = self._run_controlled_recursion(possible, predicted)
             possible = list(dict.fromkeys(possible))
             predicted = list(dict.fromkeys(predicted))
-            print(f"\t\t\t>> Recursion Depth = {self.recursion_depth}\n\t>> All Resources Found:")
-            [print(f"possible m3u8\t= {i}") for i in list(possible)]
-            [print(f"predicted m3u8\t= {i}") for i in list(predicted)]
+            self._log_monitor(
+                f"resource summary after recursion depth={self.recursion_depth} "
+                f"possible={len(possible)} predicted={len(predicted)}"
+            )
+            if self.verbose_log:
+                self._print_candidate_preview("possible", possible, limit=5)
+                self._print_candidate_preview("predicted", predicted, limit=5)
 
         return [possible, predicted]

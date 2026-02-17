@@ -53,10 +53,6 @@ class JsonProcessor:
     def write(self):
         # 创建文件夹
         os.makedirs(self.fileDir, exist_ok=True)
-        if os.path.exists(self.filePath):
-            print(f'{self.filePath}: existing json file is rebuilt')
-        else:
-            print(f'{self.filePath}: new json file is built')
         # 'w'模式下 文件存在会覆盖 文件不存在会新建
         with open(self.filePath, 'w', encoding='utf-8') as file:
             json.dump(self.data, file, ensure_ascii=False, indent=4)
