@@ -318,10 +318,11 @@
 
 `args` 字段：
 
-- `ms`：等待毫秒数，`0~30000`
+- `ms`：固定等待毫秒数，`0~30000`
+- `min_ms` / `max_ms`：随机等待区间（可选）；存在时会在区间内随机取值并覆盖固定 `ms`
 
 ```json
-{ "type": "wait", "when": ">=1", "args": { "ms": 1200 } }
+{ "type": "wait", "when": ">=1", "args": { "min_ms": 300, "max_ms": 900 } }
 ```
 
 ### 12.3 `wait_for_selector`
@@ -424,10 +425,12 @@
 - `target`
 - `repeat`：`1~20`
 - `wait_ms`：每轮点击后等待，`0~30000`
+- `wait_min_ms` / `wait_max_ms`：每轮点击后的随机等待区间（可选）
 - `max_per_selector`：每个选择器最多尝试元素数，`1~20`
 - `visible_timeout_ms`：元素可见判定超时，`100~10000`
 - `click_timeout_ms`：点击超时，`100~20000`
 - `wait_after_click_ms`：单次点击后恢复前等待，`0~10000`
+- `wait_after_click_min_ms` / `wait_after_click_max_ms`：点击后的随机等待区间（可选）
 
 ```json
 {
@@ -437,11 +440,13 @@
     "selectors": ["$player", ".play-btn"],
     "target": "all",
     "repeat": 2,
-    "wait_ms": 1200,
+    "wait_min_ms": 300,
+    "wait_max_ms": 900,
     "max_per_selector": 2,
     "visible_timeout_ms": 800,
     "click_timeout_ms": 1600,
-    "wait_after_click_ms": 300
+    "wait_after_click_min_ms": 120,
+    "wait_after_click_max_ms": 360
   }
 }
 ```
@@ -457,6 +462,7 @@
 - `visible_timeout_ms`：`100~10000`
 - `hover_timeout_ms`：`100~20000`
 - `wait_ms`：`0~30000`
+- `wait_min_ms` / `wait_max_ms`：随机等待区间（可选）
 
 ```json
 {
@@ -469,7 +475,8 @@
     "max_per_selector": 1,
     "visible_timeout_ms": 700,
     "hover_timeout_ms": 1200,
-    "wait_ms": 500
+    "wait_min_ms": 150,
+    "wait_max_ms": 500
   }
 }
 ```
@@ -571,6 +578,7 @@
 - `y`：当 `deltas` 不存在时的单次 Y 偏移
 - `x`：滚轮 X 偏移
 - `wait_after_scroll_ms`：每次滚动后等待，`0~30000`
+- `wait_after_scroll_min_ms` / `wait_after_scroll_max_ms`：滚动后的随机等待区间（可选）
 
 滚动方向：
 
@@ -584,7 +592,8 @@
   "args": {
     "deltas": [240, 900, 1500],
     "x": 0,
-    "wait_after_scroll_ms": 800
+    "wait_after_scroll_min_ms": 200,
+    "wait_after_scroll_max_ms": 800
   }
 }
 ```

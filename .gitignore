@@ -6,7 +6,9 @@ releases/
 m3u8/
 *.m3u8
 Data/
-Config.json
 ffmpeg.exe
 temporary/**
-config/**
+# config/**
+config/preset/**
+config/*.broken*
+config/config.json

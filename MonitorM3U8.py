@@ -2,6 +2,7 @@ import base64
 import fnmatch
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -64,6 +65,49 @@ class MonitorM3U8:
         if max_value is not None:
             number = min(max_value, number)
         return number
+
+    @staticmethod
+    def _wait_range_keys(base_key):
+        key = str(base_key or "").strip()
+        if key.endswith("_ms"):
+            prefix = key[:-3]
+            return f"{prefix}_min_ms", f"{prefix}_max_ms"
+        return "min_ms", "max_ms"
+
+    def _resolve_wait_ms(
+        self,
+        action,
+        base_key="ms",
+        default_ms=0,
+        min_value=0,
+        max_value=30000,
+    ):
+        min_key, max_key = self._wait_range_keys(base_key)
+        base_value = self._to_int(
+            self._action_arg(action, base_key, default_ms),
+            default_ms,
+            min_value,
+            max_value,
+        )
+        has_range = self._action_has_arg(action, min_key) or self._action_has_arg(action, max_key)
+        if not has_range:
+            return base_value
+
+        lower = self._to_int(
+            self._action_arg(action, min_key, base_value),
+            base_value,
+            min_value,
+            max_value,
+        )
+        upper = self._to_int(
+            self._action_arg(action, max_key, base_value),
+            base_value,
+            min_value,
+            max_value,
+        )
+        if lower > upper:
+            lower, upper = upper, lower
+        return random.randint(lower, upper)
 
     @staticmethod
     def _to_text_list(value):
@@ -234,12 +278,14 @@ class MonitorM3U8:
                                 "[data-dismiss='modal']",
                             ],
                             "target": "all",
-                            "repeat": 2,
-                            "wait_ms": 250,
-                            "max_per_selector": 3,
-                            "visible_timeout_ms": 500,
-                            "click_timeout_ms": 1200,
-                            "wait_after_click_ms": 120,
+                            "repeat": 1,
+                            "wait_min_ms": 80,
+                            "wait_max_ms": 180,
+                            "max_per_selector": 2,
+                            "visible_timeout_ms": 420,
+                            "click_timeout_ms": 1000,
+                            "wait_after_click_min_ms": 60,
+                            "wait_after_click_max_ms": 130,
                         },
                     },
                     {
@@ -251,7 +297,8 @@ class MonitorM3U8:
                     {
                         "type": "wait",
                         "args": {
-                            "ms": 220,
+                            "min_ms": 90,
+                            "max_ms": 180,
                         },
                     },
                 ],
@@ -260,8 +307,8 @@ class MonitorM3U8:
                         "type": "wait_group",
                         "args": {
                             "mode": "any",
-                            "timeout_ms": 4500,
-                            "poll_ms": 120,
+                            "timeout_ms": 2800,
+                            "poll_ms": 100,
                             "group_actions": [
                                 {
                                     "type": "wait_for_selector",
@@ -271,18 +318,21 @@ class MonitorM3U8:
                                             "audio",
                                             "$player",
                                             "iframe[src*='player' i]",
+                                            ".player",
+                                            ".video-wrap",
                                         ],
                                         "state": "attached",
                                         "match": "any",
                                         "target": "all",
-                                        "timeout_ms": 4200,
-                                        "poll_ms": 120,
+                                        "timeout_ms": 2600,
+                                        "poll_ms": 100,
                                     },
                                 },
                                 {
                                     "type": "wait",
                                     "args": {
-                                        "ms": 1200,
+                                        "min_ms": 280,
+                                        "max_ms": 560,
                                     },
                                 },
                             ],
@@ -303,20 +353,24 @@ class MonitorM3U8:
                                 ".play",
                                 ".play-btn",
                                 "button[class*='play' i]",
+                                "button[aria-label*='play' i]",
                             ],
                             "target": "all",
                             "repeat": 1,
-                            "wait_ms": 900,
+                            "wait_min_ms": 220,
+                            "wait_max_ms": 420,
                             "max_per_selector": 2,
-                            "visible_timeout_ms": 700,
-                            "click_timeout_ms": 1600,
-                            "wait_after_click_ms": 200,
+                            "visible_timeout_ms": 600,
+                            "click_timeout_ms": 1400,
+                            "wait_after_click_min_ms": 100,
+                            "wait_after_click_max_ms": 220,
                         },
                     },
                     {
                         "type": "wait",
                         "args": {
-                            "ms": 700,
+                            "min_ms": 180,
+                            "max_ms": 360,
                         },
                     },
                 ],
@@ -336,14 +390,16 @@ class MonitorM3U8:
                     {
                         "type": "scroll",
                         "args": {
-                            "deltas": [600, -260, 900],
-                            "wait_after_scroll_ms": 500,
+                            "deltas": [420, -180, 760],
+                            "wait_after_scroll_min_ms": 100,
+                            "wait_after_scroll_max_ms": 220,
                         },
                     },
                     {
                         "type": "wait",
                         "args": {
-                            "ms": 650,
+                            "min_ms": 180,
+                            "max_ms": 320,
                         },
                     },
                 ],
@@ -355,19 +411,36 @@ class MonitorM3U8:
                         },
                     },
                     {
-                        "type": "wait_for_selector",
+                        "type": "wait_group",
                         "args": {
-                            "selectors": [
-                                "video",
-                                ".player",
-                                "$player",
-                                "iframe",
-                            ],
-                            "state": "attached",
-                            "match": "any",
-                            "target": "all",
-                            "timeout_ms": 5000,
+                            "mode": "any",
+                            "timeout_ms": 3200,
                             "poll_ms": 120,
+                            "group_actions": [
+                                {
+                                    "type": "wait_for_selector",
+                                    "args": {
+                                        "selectors": [
+                                            "video",
+                                            ".player",
+                                            "$player",
+                                            "iframe",
+                                        ],
+                                        "state": "attached",
+                                        "match": "any",
+                                        "target": "all",
+                                        "timeout_ms": 3000,
+                                        "poll_ms": 120,
+                                    },
+                                },
+                                {
+                                    "type": "wait",
+                                    "args": {
+                                        "min_ms": 300,
+                                        "max_ms": 650,
+                                    },
+                                },
+                            ],
                         },
                     },
                     {
@@ -381,12 +454,14 @@ class MonitorM3U8:
                                 "button[class*='play' i]",
                             ],
                             "target": "all",
-                            "repeat": 2,
-                            "wait_ms": 1000,
+                            "repeat": 1,
+                            "wait_min_ms": 260,
+                            "wait_max_ms": 520,
                             "max_per_selector": 2,
-                            "visible_timeout_ms": 700,
-                            "click_timeout_ms": 1800,
-                            "wait_after_click_ms": 200,
+                            "visible_timeout_ms": 650,
+                            "click_timeout_ms": 1600,
+                            "wait_after_click_min_ms": 100,
+                            "wait_after_click_max_ms": 230,
                         },
                     },
                     {
@@ -400,28 +475,18 @@ class MonitorM3U8:
                             "target": "all",
                             "repeat": 1,
                             "max_per_selector": 1,
-                            "visible_timeout_ms": 700,
-                            "hover_timeout_ms": 1200,
-                            "wait_ms": 350,
+                            "visible_timeout_ms": 600,
+                            "hover_timeout_ms": 1000,
+                            "wait_min_ms": 120,
+                            "wait_max_ms": 260,
                         },
                     },
                     {
                         "type": "scroll",
                         "args": {
-                            "deltas": [1200, -500, 1600, -900],
-                            "wait_after_scroll_ms": 600,
-                        },
-                    },
-                    {
-                        "type": "mouse_click",
-                        "args": {
-                            "position": {
-                                "x": "center",
-                                "y": "center",
-                            },
-                            "button": "left",
-                            "click_count": 1,
-                            "delay_ms": 0,
+                            "deltas": [900, -360, 1200, -700],
+                            "wait_after_scroll_min_ms": 120,
+                            "wait_after_scroll_max_ms": 260,
                         },
                     },
                     {
@@ -433,7 +498,8 @@ class MonitorM3U8:
                     {
                         "type": "wait",
                         "args": {
-                            "ms": 1200,
+                            "min_ms": 300,
+                            "max_ms": 700,
                         },
                     },
                 ],
@@ -549,7 +615,7 @@ class MonitorM3U8:
     def _action_arg_whitelist():
         return {
             "chain": {"name"},
-            "wait": {"ms"},
+            "wait": {"ms", "min_ms", "max_ms"},
             "wait_for_selector": {"selector", "selectors", "state", "match", "target", "timeout_ms", "poll_ms"},
             "wait_group": {"mode", "timeout_ms", "poll_ms", "group_actions"},
             "play_media": {"target"},
@@ -559,10 +625,14 @@ class MonitorM3U8:
                 "target",
                 "repeat",
                 "wait_ms",
+                "wait_min_ms",
+                "wait_max_ms",
                 "max_per_selector",
                 "visible_timeout_ms",
                 "click_timeout_ms",
                 "wait_after_click_ms",
+                "wait_after_click_min_ms",
+                "wait_after_click_max_ms",
             },
             "hover": {
                 "selector",
@@ -573,6 +643,8 @@ class MonitorM3U8:
                 "visible_timeout_ms",
                 "hover_timeout_ms",
                 "wait_ms",
+                "wait_min_ms",
+                "wait_max_ms",
             },
             "fill": {
                 "selector",
@@ -588,7 +660,14 @@ class MonitorM3U8:
             "wait_for_load_state": {"state", "timeout_ms"},
             "goto": {"url", "wait_until", "timeout_ms"},
             "evaluate": {"script", "selector", "target", "arg"},
-            "scroll": {"deltas", "y", "x", "wait_after_scroll_ms"},
+            "scroll": {
+                "deltas",
+                "y",
+                "x",
+                "wait_after_scroll_ms",
+                "wait_after_scroll_min_ms",
+                "wait_after_scroll_max_ms",
+            },
             "mouse_click": {"position", "x", "y", "button", "click_count", "delay_ms"},
             "press": {"key"},
             "log": {"message"},
@@ -631,8 +710,9 @@ class MonitorM3U8:
                 raise ValueError(f"{path}.args.target invalid: {args.get('target')}")
 
         if action_type == "wait":
-            if "ms" in args and not self._is_number(args.get("ms")):
-                raise ValueError(f"{path}.args.ms must be number")
+            for key in ("ms", "min_ms", "max_ms"):
+                if key in args and not self._is_number(args.get(key)):
+                    raise ValueError(f"{path}.args.{key} must be number")
             return
 
         if action_type == "wait_for_selector":
@@ -675,10 +755,14 @@ class MonitorM3U8:
             for key in (
                 "repeat",
                 "wait_ms",
+                "wait_min_ms",
+                "wait_max_ms",
                 "max_per_selector",
                 "visible_timeout_ms",
                 "click_timeout_ms",
                 "wait_after_click_ms",
+                "wait_after_click_min_ms",
+                "wait_after_click_max_ms",
             ):
                 if key in args and not self._is_number(args.get(key)):
                     raise ValueError(f"{path}.args.{key} must be number")
@@ -691,6 +775,8 @@ class MonitorM3U8:
                 "visible_timeout_ms",
                 "hover_timeout_ms",
                 "wait_ms",
+                "wait_min_ms",
+                "wait_max_ms",
             ):
                 if key in args and not self._is_number(args.get(key)):
                     raise ValueError(f"{path}.args.{key} must be number")
@@ -738,7 +824,13 @@ class MonitorM3U8:
         if action_type == "scroll":
             if "deltas" in args and not isinstance(args.get("deltas"), list):
                 raise ValueError(f"{path}.args.deltas must be array")
-            for key in ("y", "x", "wait_after_scroll_ms"):
+            for key in (
+                "y",
+                "x",
+                "wait_after_scroll_ms",
+                "wait_after_scroll_min_ms",
+                "wait_after_scroll_max_ms",
+            ):
                 if key in args and not self._is_number(args.get(key)):
                     raise ValueError(f"{path}.args.{key} must be number")
             return
@@ -1626,7 +1718,7 @@ class MonitorM3U8:
                         continue
                     element.click(timeout=click_timeout_ms)
                     if page_for_recover is not None:
-                        page_for_recover.wait_for_timeout(wait_after_click_ms)
+                        self._pause(page_for_recover, wait_after_click_ms)
                         self._recover_page_if_needed(page_for_recover, stable_url or self.URL)
                     return True
                 except Exception:
@@ -1964,7 +2056,7 @@ class MonitorM3U8:
         time.sleep(duration_ms / 1000.0)
 
     def _action_wait(self, page, action, stable_url, before_count):
-        wait_ms = self._to_int(self._action_arg(action, "ms", 300), 300, 0, 30000)
+        wait_ms = self._resolve_wait_ms(action, "ms", 300, 0, 30000)
         if wait_ms > 0:
             self._pause(page, wait_ms)
 
@@ -1978,11 +2070,11 @@ class MonitorM3U8:
             return
 
         repeat = self._to_int(self._action_arg(action, "repeat", 1), 1, 1, 20)
-        wait_ms = self._to_int(self._action_arg(action, "wait_ms", 300), 300, 0, 30000)
+        wait_ms = self._resolve_wait_ms(action, "wait_ms", 300, 0, 30000)
         max_per_selector = self._to_int(self._action_arg(action, "max_per_selector", 2), 2, 1, 20)
         visible_timeout_ms = self._to_int(self._action_arg(action, "visible_timeout_ms", 600), 600, 100, 10000)
         click_timeout_ms = self._to_int(self._action_arg(action, "click_timeout_ms", 1400), 1400, 100, 20000)
-        wait_after_click_ms = self._to_int(self._action_arg(action, "wait_after_click_ms", 250), 250, 0, 10000)
+        wait_after_click_ms = self._resolve_wait_ms(action, "wait_after_click_ms", 250, 0, 10000)
 
         for _ in range(repeat):
             for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
@@ -1997,7 +2089,7 @@ class MonitorM3U8:
                     wait_after_click_ms=wait_after_click_ms,
                 )
             if wait_ms > 0:
-                page.wait_for_timeout(wait_ms)
+                self._pause(page, wait_ms)
 
     def _action_hover(self, page, action, stable_url, before_count):
         selectors = self._resolve_action_selectors(action)
@@ -2008,7 +2100,7 @@ class MonitorM3U8:
         max_per_selector = self._to_int(self._action_arg(action, "max_per_selector", 1), 1, 1, 20)
         visible_timeout_ms = self._to_int(self._action_arg(action, "visible_timeout_ms", 600), 600, 100, 10000)
         hover_timeout_ms = self._to_int(self._action_arg(action, "hover_timeout_ms", 1200), 1200, 100, 20000)
-        wait_ms = self._to_int(self._action_arg(action, "wait_ms", 200), 200, 0, 30000)
+        wait_ms = self._resolve_wait_ms(action, "wait_ms", 200, 0, 30000)
 
         for _ in range(repeat):
             for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
@@ -2030,7 +2122,7 @@ class MonitorM3U8:
                             continue
 
             if wait_ms > 0:
-                page.wait_for_timeout(wait_ms)
+                self._pause(page, wait_ms)
 
     def _action_fill(self, page, action, stable_url, before_count):
         selectors = self._resolve_action_selectors(action)
@@ -2118,7 +2210,7 @@ class MonitorM3U8:
                 continue
 
             if child_type == "wait":
-                delay_ms = self._to_int(self._action_arg(child_action, "ms", 0), 0, 0, 120000)
+                delay_ms = self._resolve_wait_ms(child_action, "ms", 0, 0, 120000)
                 compiled.append(
                     {
                         "kind": "timer",
@@ -2262,7 +2354,13 @@ class MonitorM3U8:
         if not isinstance(deltas, list) or len(deltas) == 0:
             deltas = [self._action_arg(action, "y", 240)]
         wheel_x = self._to_int(self._action_arg(action, "x", 0), 0)
-        wait_after_scroll_ms = self._to_int(self._action_arg(action, "wait_after_scroll_ms", 250), 250, 0, 30000)
+        wait_after_scroll_ms = self._resolve_wait_ms(
+            action,
+            "wait_after_scroll_ms",
+            250,
+            0,
+            30000,
+        )
 
         for delta in deltas:
             try:
@@ -2270,7 +2368,7 @@ class MonitorM3U8:
             except Exception:
                 pass
             if wait_after_scroll_ms > 0:
-                page.wait_for_timeout(wait_after_scroll_ms)
+                self._pause(page, wait_after_scroll_ms)
 
     def _action_mouse_click(self, page, action, stable_url, before_count):
         viewport = page.viewport_size or {"width": 1280, "height": 720}
@@ -2348,17 +2446,22 @@ class MonitorM3U8:
                 raise last_error
             raise RuntimeError("failed to launch browser")
 
+        chromium_executable_logged = False
+
         def __monitor_single(playwright_driver, interaction_stage=1, attempt=1, tries=1):
+            nonlocal chromium_executable_logged
             launch_args = [
                 "--disable-blink-features=AutomationControlled",
                 "--autoplay-policy=no-user-gesture-required",
                 "--disable-extensions",
                 "--disable-component-extensions-with-background-pages",
             ]
-            try:
-                print(f"\tplaywright chromium executable={playwright_driver.chromium.executable_path}")
-            except Exception:
-                pass
+            if not chromium_executable_logged:
+                try:
+                    print(f"\tplaywright chromium executable={playwright_driver.chromium.executable_path}")
+                except Exception:
+                    pass
+                chromium_executable_logged = True
             launch_kwargs = {
                 "headless": self.headless,
                 "args": launch_args,
@@ -2612,7 +2715,10 @@ class MonitorM3U8:
         return possible, predicted
 
     def TimerPrint(self, cnt):
-        print(f"\rwaiting **{cnt}** s for resources to find", end="")
+        if cnt <= 0:
+            return
+        if cnt == 1 or cnt % 5 == 0:
+            print(f"\twaiting {cnt}s for resources to find...")
 
     def get_session_hints(self):
         return {
@@ -2624,9 +2730,12 @@ class MonitorM3U8:
         }
 
     def simple(self, run_recursive=True):
+        self.timer.ResetCounter()
         self.timer.StartTimer()
         possible, predicted = self.MonitorUrl()
         self.timer.StopTimer()
+        if self.timer.call_count > 0:
+            print(f"\tmonitor elapsed ~{self.timer.call_count}s")
 
         if possible == [] and predicted == []:
             print("find no resource to download\n\n")
