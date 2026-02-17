@@ -950,8 +950,11 @@ class MonitorM3U8:
                 trace=trace + [chain_name],
                 depth=depth + 1,
             )
-            override_when = str(action.get("when", "")).strip().lower()
-            if override_when == "":
+            has_override_when = "when" in action
+            override_when = action.get("when")
+            if isinstance(override_when, str):
+                has_override_when = override_when.strip() != ""
+            if not has_override_when:
                 expanded.extend(nested_actions)
                 continue
             for nested_action in nested_actions:
