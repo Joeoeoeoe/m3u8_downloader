@@ -1,0 +1,1 @@
+ffmpeg -allowed_extensions ALL -i .TEMP\index.m3u8 -c copy output.mp4
