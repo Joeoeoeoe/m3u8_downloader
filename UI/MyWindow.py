@@ -1,6 +1,7 @@
 # python库
 import json
 import os
+import re
 import sys
 import threading
 from datetime import datetime
@@ -26,6 +27,30 @@ STOP_MODE_OPTIONS = ["阶段停止", "强制重启", "强制退出"]
 DEFAULT_PROXY_ADDRESS = "127.0.0.1"
 DEFAULT_PROXY_PORT = "7897"
 PRESET_DIR = os.path.join(os.getcwd(), "config", "preset")
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+}
 
 
 def default_config():
@@ -87,6 +112,166 @@ def _to_text(value, default=""):
     if value is None:
         return default
     return str(value).strip()
+
+
+def _normalize_path_text(path_text):
+    text = _to_text(path_text, "")
+    if text == "":
+        return ""
+    text = text.strip().strip('"').strip("'")
+    text = os.path.expandvars(os.path.expanduser(text))
+    if text == "":
+        return ""
+    text = text.replace("\\", os.sep).replace("/", os.sep)
+    text = os.path.normpath(text)
+    if not os.path.isabs(text):
+        text = os.path.abspath(text)
+    return text
+
+
+def _sanitize_filesystem_path(path_text):
+    path = _to_text(path_text, "")
+    if path == "":
+        return ""
+    if os.name != "nt":
+        return path.replace("\x00", "_")
+
+    rebuilt = []
+    for idx, ch in enumerate(path):
+        if ch == ":":
+            if idx == 1 and path[0].isalpha():
+                rebuilt.append(ch)
+            else:
+                rebuilt.append("_")
+            continue
+        if ch in '<>"|?*' or ord(ch) < 32:
+            rebuilt.append("_")
+            continue
+        rebuilt.append(ch)
+    path = "".join(rebuilt).replace("/", "\\")
+
+    drive, tail = os.path.splitdrive(path)
+    leading_sep = tail.startswith("\\")
+    parts = [p for p in re.split(r"[\\/]+", tail) if p not in {"", "."}]
+    sanitized_parts = []
+    for part in parts:
+        if part == "..":
+            sanitized_parts.append(part)
+            continue
+        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", part).rstrip(" .")
+        if cleaned == "":
+            cleaned = "_"
+        if cleaned.upper() in WINDOWS_RESERVED_NAMES:
+            cleaned = f"_{cleaned}_"
+        sanitized_parts.append(cleaned)
+
+    sep = "\\"
+    prefix = ""
+    if drive != "":
+        prefix = drive + (sep if leading_sep else "")
+    elif path.startswith("\\\\"):
+        prefix = "\\\\"
+    elif leading_sep:
+        prefix = sep
+    body = sep.join(sanitized_parts)
+
+    if body == "":
+        if drive != "" and not leading_sep:
+            return prefix.rstrip(sep)
+        return prefix if prefix != "" else path
+    return prefix + body
+
+
+def _is_structurally_valid_path(path_text):
+    path = _to_text(path_text, "")
+    if path == "" or "\x00" in path:
+        return False
+    if os.name != "nt":
+        return True
+    return _sanitize_filesystem_path(path) == path
+
+
+def _try_prepare_directory(path, create=False):
+    try:
+        if os.path.isfile(path):
+            return False, "path points to an existing file"
+        if create:
+            os.makedirs(path, exist_ok=True)
+        if os.path.isdir(path):
+            return True, ""
+        if not create:
+            return True, ""
+        return False, "directory is not available"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _resolve_directory_input(path_text, fallback_dir="", create=False, allow_fallback=False):
+    normalized_fallback = _normalize_path_text(fallback_dir)
+    source = _normalize_path_text(path_text)
+    if source == "":
+        source = normalized_fallback
+    if source == "":
+        return {"ok": False, "path": "", "reason": "directory is empty", "changed": False}
+
+    if os.path.isfile(source):
+        source = os.path.dirname(source)
+
+    candidates = []
+    candidate_inputs = [
+        source,
+        _normalize_path_text(_sanitize_filesystem_path(source)),
+    ]
+    if allow_fallback and normalized_fallback != "":
+        candidate_inputs.append(normalized_fallback)
+
+    for item in candidate_inputs:
+        if item != "" and item not in candidates:
+            candidates.append(item)
+
+    last_reason = "directory is invalid"
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            candidate = os.path.dirname(candidate)
+        if not _is_structurally_valid_path(candidate):
+            last_reason = "directory contains invalid characters"
+            continue
+        ok, reason = _try_prepare_directory(candidate, create=create)
+        if ok:
+            return {
+                "ok": True,
+                "path": candidate,
+                "reason": "",
+                "changed": candidate != source,
+            }
+        if reason != "":
+            last_reason = reason
+    return {"ok": False, "path": source, "reason": last_reason, "changed": False}
+
+
+def _normalize_filename_input(filename, fallback):
+    default_name = _to_text(fallback, "output")
+    if default_name == "":
+        default_name = "output"
+
+    text = _to_text(filename, "")
+    text = text.strip().strip('"').strip("'")
+    if text != "":
+        text = text.replace("\\", os.sep).replace("/", os.sep)
+        text = os.path.basename(text)
+        text = os.path.splitext(text)[0].strip()
+    if text == "":
+        text = default_name
+
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text).rstrip(" .").strip()
+    if text == "":
+        text = default_name
+        text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text).rstrip(" .").strip()
+    if text == "":
+        text = "output"
+    if os.name == "nt" and text.upper() in WINDOWS_RESERVED_NAMES:
+        text = f"_{text}_"
+    return text
 
 
 def _build_proxy_config(data):
@@ -211,8 +396,13 @@ def normalize_config_dict(data):
     if monitor_rules_path == "":
         monitor_rules_path = defaults["monitorRulesPath"]
 
-    folder = _to_text(merged.get("folder"), defaults["folder"]) or defaults["folder"]
-    filename = _to_text(merged.get("filename"), defaults["filename"]) or defaults["filename"]
+    raw_folder = _normalize_path_text(merged.get("folder"))
+    if raw_folder == "" or not _is_structurally_valid_path(raw_folder):
+        folder = defaults["folder"]
+    else:
+        folder_result = _resolve_directory_input(raw_folder, defaults["folder"], create=False, allow_fallback=True)
+        folder = folder_result["path"] if folder_result["ok"] else defaults["folder"]
+    filename = _normalize_filename_input(merged.get("filename"), defaults["filename"])
     proxy = _build_proxy_config(merged)
 
     list_mode_text_map = {
@@ -895,6 +1085,8 @@ class Worker(QThread):
 
 
 class MyConfigWindow(QMainWindow):
+    configSaved = pyqtSignal(dict)
+
     def __init__(self):
         super().__init__()
         # 初始化界面
@@ -913,6 +1105,8 @@ class MyConfigWindow(QMainWindow):
         self._safe_reconnect(self.ui.proxyCheckBox.toggled, self.on_proxyCheckBox_toggled)
         self._safe_reconnect(self.ui.savePresetButton.clicked, self.on_savePresetButton_clicked)
         self._safe_reconnect(self.ui.loadPresetButton.clicked, self.on_loadPresetButton_clicked)
+        self._safe_reconnect(self.ui.folderEdit.textChanged, self.on_folderEdit_textChanged)
+        self._safe_reconnect(self.ui.folderEdit.editingFinished, self.on_folderEdit_editingFinished)
 
         # 数据
         self.Config = ConfigJson()
@@ -926,6 +1120,31 @@ class MyConfigWindow(QMainWindow):
         except TypeError:
             pass
         signal.connect(slot)
+
+    def _validate_folder_input(self, create=False, apply_fix=False):
+        defaults = default_config()
+        result = _resolve_directory_input(self.ui.folderEdit.text(), defaults["folder"], create=create)
+        if result["ok"]:
+            if apply_fix and self.ui.folderEdit.text().strip() != result["path"]:
+                self.ui.folderEdit.setText(result["path"])
+            self.ui.folderEdit.setStyleSheet("")
+            self.ui.folderEdit.setToolTip(result["path"])
+            self.ui.applyButton.setEnabled(True)
+            self.ui.confirmButton.setEnabled(True)
+            return result
+
+        message = result.get("reason", "directory is invalid")
+        self.ui.folderEdit.setStyleSheet("border: 1px solid #d9534f;")
+        self.ui.folderEdit.setToolTip(f"无效目录: {message}")
+        self.ui.applyButton.setEnabled(False)
+        self.ui.confirmButton.setEnabled(False)
+        return result
+
+    def on_folderEdit_textChanged(self, _text):
+        self._validate_folder_input(create=False, apply_fix=False)
+
+    def on_folderEdit_editingFinished(self):
+        self._validate_folder_input(create=False, apply_fix=True)
 
     def on_recursionCheckBox_toggled(self, checked):
         self.ui.deepSpinBox.setEnabled(checked)
@@ -988,6 +1207,27 @@ class MyConfigWindow(QMainWindow):
     def loadConfig(self):
         try:
             config = ensure_normalized_config(self.Config)
+            defaults = default_config()
+            current_folder = _normalize_path_text(config.get("folder", ""))
+            if current_folder == "" or not _is_structurally_valid_path(current_folder):
+                valid_folder = defaults["folder"]
+            else:
+                folder_result = _resolve_directory_input(
+                    current_folder,
+                    defaults["folder"],
+                    create=False,
+                    allow_fallback=True,
+                )
+                valid_folder = folder_result["path"] if folder_result["ok"] else defaults["folder"]
+            valid_filename = _normalize_filename_input(config.get("filename", ""), defaults["filename"])
+            if valid_folder != config.get("folder") or valid_filename != config.get("filename"):
+                repaired = dict(config)
+                repaired["folder"] = valid_folder
+                repaired["filename"] = valid_filename
+                self.Config.data = normalize_config_dict(repaired)
+                self.Config.write()
+                config = dict(self.Config.data)
+
             self.ui.folderEdit.setText(config["folder"])
             self.ui.filenameEdit.setText(config["filename"])
             self.ui.fileExtCombo.setCurrentIndex(config["fileExt"])
@@ -1008,6 +1248,7 @@ class MyConfigWindow(QMainWindow):
             self.on_recursionCheckBox_toggled(config["recursionEnabled"])
             self.on_attemptCheckBox_toggled(config.get("monitorTryEnabled", True))
             self.on_proxyCheckBox_toggled(config["proxyEnabled"])
+            self._validate_folder_input(create=False, apply_fix=False)
         except Exception:
             print("failed to load config: config is set to default!")
             self.on_resetButton_clicked()
@@ -1015,14 +1256,23 @@ class MyConfigWindow(QMainWindow):
 
     def on_openFolderButton_clicked(self):
         # 打开文件夹选择对话框
-        path = QFileDialog.getExistingDirectory(self, "选择文件夹", self.ui.folderEdit.text())
+        defaults = default_config()
+        current = _resolve_directory_input(
+            self.ui.folderEdit.text(),
+            defaults["folder"],
+            create=False,
+            allow_fallback=True,
+        )
+        initial_dir = current["path"] if current["ok"] else defaults["folder"]
+        path = QFileDialog.getExistingDirectory(self, "选择文件夹", initial_dir)
         if path:
             self.ui.folderEdit.setText(path)
+            self._validate_folder_input(create=False, apply_fix=True)
 
     def on_resetButton_clicked(self):
         config = default_config()
         self.ui.folderEdit.setText(config["folder"])
-        self.ui.filenameEdit.setText(config["filename"])
+        self.ui.filenameEdit.setText(_normalize_filename_input(config["filename"], config["filename"]))
         self.ui.fileExtCombo.setCurrentIndex(config["fileExt"])
         self.ui.recursionCheckBox.setChecked(config["recursionEnabled"])
         self.ui.deepSpinBox.setValue(config["recursionDepth"])
@@ -1041,11 +1291,17 @@ class MyConfigWindow(QMainWindow):
         self.on_recursionCheckBox_toggled(config["recursionEnabled"])
         self.on_attemptCheckBox_toggled(config["monitorTryEnabled"])
         self.on_proxyCheckBox_toggled(config["proxyEnabled"])
+        self._validate_folder_input(create=False, apply_fix=False)
 
     def on_applyButton_clicked(self):
+        folder_result = self._validate_folder_input(create=True, apply_fix=True)
+        if not folder_result["ok"]:
+            print(f"invalid folder path: {folder_result.get('reason', 'unknown error')}")
+            return False
+
         updated = dict(self.Config.data if isinstance(self.Config.data, dict) else {})
-        updated["folder"] = self.ui.folderEdit.text().strip()
-        updated["filename"] = self.ui.filenameEdit.text().strip()
+        updated["folder"] = folder_result["path"]
+        updated["filename"] = _normalize_filename_input(self.ui.filenameEdit.text(), default_config()["filename"])
         updated["fileExt"] = self.ui.fileExtCombo.currentIndex()
         updated["fileExtText"] = self.ui.fileExtCombo.currentText().strip()
         updated["recursionEnabled"] = self.ui.recursionCheckBox.isChecked()
@@ -1065,9 +1321,14 @@ class MyConfigWindow(QMainWindow):
         updated["proxyPassword"] = self.ui.proxyPasswordEdit.text().strip()
         updated["maxParallel"] = self.ui.concurrentSpinBox.value()
         updated["monitorHeadless"] = self.ui.headlessCheckBox.isChecked()
+
+        self.ui.folderEdit.setText(updated["folder"])
+        self.ui.filenameEdit.setText(updated["filename"])
         self.Config.data = normalize_config_dict(updated)
         self.Config.write()
         self.loadConfig()
+        self.configSaved.emit(dict(self.Config.data))
+        return True
 
     def on_savePresetButton_clicked(self):
         preset_dir = self._ensure_preset_dir()
@@ -1112,8 +1373,8 @@ class MyConfigWindow(QMainWindow):
             print(f"preset load failed: {exc}")
 
     def on_confirmButton_clicked(self):
-        self.on_applyButton_clicked()
-        self.close()  # 退出配置窗口
+        if self.on_applyButton_clicked():
+            self.close()  # 退出配置窗口
 
 
 class MyWindow(QMainWindow):
@@ -1133,7 +1394,9 @@ class MyWindow(QMainWindow):
         sys.stdout.rawWritten.connect(self.on_stdout_raw_written)
 
         # 避免第一次启动时读取到不完整配置
-        ensure_normalized_config(ConfigJson())
+        initial_config = ensure_normalized_config(ConfigJson())
+        self._default_folder = initial_config["folder"]
+        self._default_filename = initial_config["filename"]
 
         # 配置窗口
         self.configWindow = MyConfigWindow()  # 对config文件进行检查，避免后续读取错误
@@ -1160,11 +1423,16 @@ class MyWindow(QMainWindow):
         self.ui.configButton.clicked.connect(self.on_configButton_clicked)
         self.ui.clearButton.clicked.connect(self.on_clearButton_clicked)
         self.ui.clearLogButton.clicked.connect(self.on_clearLogButton_clicked)
+        self.ui.openFolderButton.clicked.connect(self.on_openFolderButton_clicked)
+        self.ui.folderEdit.textChanged.connect(self.on_folderEdit_textChanged)
+        self.ui.filenameEdit.textChanged.connect(self.on_filenameEdit_textChanged)
 
         self.ui.clearButton.setVisible(False)
         self.ui.monitorProgressBar.setValue(0)
         self.ui.downloadProgressBar.setValue(0)
         self.ui.generalProgressBar.setValue(0)
+        self._refresh_default_input_hints(initial_config)
+        self._refresh_main_input_validation()
 
     def _close_log_file(self):
         if self._log_file_handle is not None:
@@ -1198,6 +1466,58 @@ class MyWindow(QMainWindow):
         self.worker.logFileReady.connect(self.on_worker_log_file_ready)
         self.worker.runCompleted.connect(self.on_worker_run_completed)
         self.worker.start()  # 线程开始
+
+    def _refresh_default_input_hints(self, config=None):
+        effective = config if isinstance(config, dict) else ensure_normalized_config(ConfigJson())
+        defaults = default_config()
+        folder_result = _resolve_directory_input(
+            effective.get("folder", defaults["folder"]),
+            defaults["folder"],
+            create=False,
+            allow_fallback=True,
+        )
+        self._default_folder = folder_result["path"] if folder_result["ok"] else defaults["folder"]
+        self._default_filename = _normalize_filename_input(
+            effective.get("filename", defaults["filename"]),
+            defaults["filename"],
+        )
+        self.ui.filenameEdit.setToolTip(f"默认文件名：{self._default_filename}")
+        self.ui.filenameEdit.setPlaceholderText(f"输入文件名，留空：{self._default_filename}")
+        self.ui.folderEdit.setToolTip(f"默认目录：{self._default_folder}")
+        self.ui.folderEdit.setPlaceholderText(f"输入/选择存储地址，留空：{self._default_folder}")
+
+    def _refresh_main_input_validation(self):
+        result = _resolve_directory_input(self.ui.folderEdit.text(), self._default_folder, create=False)
+        if result["ok"]:
+            self.ui.folderEdit.setStyleSheet("")
+            if self.ui.folderEdit.text().strip() != "":
+                self.ui.folderEdit.setToolTip(result["path"])
+        else:
+            self.ui.folderEdit.setStyleSheet("border: 1px solid #d9534f;")
+            reason = result.get("reason", "directory is invalid")
+            self.ui.folderEdit.setToolTip(f"无效目录: {reason}")
+
+        can_start = result["ok"] and not (self.worker is not None and self.worker.isRunning())
+        self.ui.startButton.setEnabled(can_start)
+
+    def on_folderEdit_textChanged(self, _text):
+        self._refresh_main_input_validation()
+
+    def on_filenameEdit_textChanged(self, _text):
+        self._refresh_main_input_validation()
+
+    def on_openFolderButton_clicked(self):
+        current = _resolve_directory_input(
+            self.ui.folderEdit.text(),
+            self._default_folder,
+            create=False,
+            allow_fallback=True,
+        )
+        initial_dir = current["path"] if current["ok"] else self._default_folder
+        path = QFileDialog.getExistingDirectory(self, "选择文件夹", initial_dir)
+        if path:
+            self.ui.folderEdit.setText(path)
+            self._refresh_main_input_validation()
 
     @staticmethod
     def _is_completed_line(line_text):
@@ -1240,6 +1560,12 @@ class MyWindow(QMainWindow):
         try:
             run_config = config.data.get("Config", {})
             run_config = normalize_config_dict(run_config)
+            folder_result = _resolve_directory_input(run_config.get("folder", ""), self._default_folder, create=True)
+            if not folder_result["ok"]:
+                print(f"invalid folder path in file config: {folder_result.get('reason', 'unknown error')}")
+                return
+            run_config["folder"] = folder_result["path"]
+            run_config["filename"] = _normalize_filename_input(run_config.get("filename", ""), self._default_filename)
 
             # 进行下载时真实使用的设置，而非Config中的配置
             passing_dict = {
@@ -1275,12 +1601,20 @@ class MyWindow(QMainWindow):
 
     def on_startButton_clicked(self):
         config = ensure_normalized_config(ConfigJson())
+        self._refresh_default_input_hints(config)
 
         url = self.ui.urlEdit.text().strip()  # 读取 QLineEdit 的内容
-        folder = config["folder"]
-        filename = self.ui.filenameEdit.text().strip()
-        filename = filename if filename != "" else config["filename"]
-        filename = filename.split(".")[0]
+        folder_result = _resolve_directory_input(self.ui.folderEdit.text(), self._default_folder, create=True)
+        if not folder_result["ok"]:
+            print(f"invalid folder path: {folder_result.get('reason', 'unknown error')}")
+            self._refresh_main_input_validation()
+            return
+        folder = folder_result["path"]
+        filename = _normalize_filename_input(self.ui.filenameEdit.text(), self._default_filename)
+        if self.ui.folderEdit.text().strip() != folder:
+            self.ui.folderEdit.setText(folder)
+        if self.ui.filenameEdit.text().strip() != filename:
+            self.ui.filenameEdit.setText(filename)
 
         # 进行下载时真实使用的设置，而非Config中的配置
         passing_dict = {
@@ -1319,16 +1653,19 @@ class MyWindow(QMainWindow):
         self.ui.openFileButton.setEnabled(False)
         self.ui.urlEdit.setReadOnly(True)  # 只读模式
         self.ui.filenameEdit.setReadOnly(True)  # 只读模式
+        self.ui.folderEdit.setReadOnly(True)
+        self.ui.openFolderButton.setEnabled(False)
         self.ui.monitorProgressBar.setValue(0)
         self.ui.downloadProgressBar.setValue(0)
         self.ui.generalProgressBar.setValue(0)
 
     def on_worker_finished(self):
         # 控件状态
-        self.ui.startButton.setEnabled(True)
         self.ui.openFileButton.setEnabled(True)
         self.ui.urlEdit.setReadOnly(False)
         self.ui.filenameEdit.setReadOnly(False)
+        self.ui.folderEdit.setReadOnly(False)
+        self.ui.openFolderButton.setEnabled(True)
         self._close_log_file()
         if self._last_worker_completed and not self._worker_stopped_by_user:
             self.ui.clearButton.setVisible(True)
@@ -1336,6 +1673,7 @@ class MyWindow(QMainWindow):
             self.ui.clearButton.setVisible(False)
         # 释放 worker 引用，方便下次启动新任务
         self.worker = None
+        self._refresh_main_input_validation()
 
     def on_stopButton_clicked(self):
         stop_mode = ensure_normalized_config(ConfigJson())["stopMode"]
@@ -1357,17 +1695,24 @@ class MyWindow(QMainWindow):
     def on_configButton_clicked(self):
         # 直接重新创建一个新的窗口
         self.configWindow = MyConfigWindow()
+        self.configWindow.configSaved.connect(self.on_config_saved)
         self.configWindow.show()
+
+    def on_config_saved(self, payload):
+        self._refresh_default_input_hints(payload if isinstance(payload, dict) else None)
+        self._refresh_main_input_validation()
 
     def on_clearButton_clicked(self):
         self.ui.urlEdit.clear()
         self.ui.filenameEdit.clear()
+        self.ui.folderEdit.clear()
         self.ui.textBrowser.clear()
         self._ui_line_buffer = ""
         self.ui.monitorProgressBar.setValue(0)
         self.ui.downloadProgressBar.setValue(0)
         self.ui.generalProgressBar.setValue(0)
         self.ui.clearButton.setVisible(False)
+        self._refresh_main_input_validation()
 
     def on_clearLogButton_clicked(self):
         self.ui.textBrowser.clear()
