@@ -200,7 +200,7 @@ class Ui_ConfigWindow(object):
         sizePolicy.setVerticalStretch(0)
         sizePolicy.setHeightForWidth(self.openFolderButton.sizePolicy().hasHeightForWidth())
         self.openFolderButton.setSizePolicy(sizePolicy)
-        self.openFolderButton.setMaximumSize(QtCore.QSize(40, 16777215))
+        self.openFolderButton.setMaximumSize(QtCore.QSize(40, 20))
         font = QtGui.QFont()
         font.setFamily("Microsoft YaHei UI")
         font.setPointSize(10)
