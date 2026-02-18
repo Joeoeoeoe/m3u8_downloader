@@ -49,9 +49,15 @@ class DownloadM3U8:
 
         # 超时和异常
         self.connections = 0  # 总的请求次数，用于输出
-        self.timeout = 4  # 初始超时时间设置为4秒
+        self.minTimeout = 4
+        self.timeout = self.minTimeout  # 初始超时时间设置为4秒
         self.maxTimeout = 25  # 最大超时时间为25秒
-        self.threshold = 0.3  # 最大忍受的失败比例
+        self.timeout_step_up = 2
+        self.timeout_step_down = 1
+        self.timeout_raise_threshold = 0.45
+        self.timeout_recover_threshold = 0.15
+        self.timeout_adjust_cooldown = 8
+        self.timeout_min_observations = 20
         self.interval = 10  # 定时器间隔
         self.timeoutTimer = TimerTimer(self.interval, self.TimeoutAdapting)  # 初始化定时器，动态调整超时时间
         self.failedNameList = []
@@ -63,6 +69,10 @@ class DownloadM3U8:
         self.round_threads = self.threadNum
         self.state_lock = threading.Lock()
         self.blocking_failures = 0
+        self.total_failures = 0
+        self.timeout_last_eval_connections = 0
+        self.timeout_last_eval_failures = 0
+        self.timeout_last_adjust_ts = 0.0
         self.session_hints = self._normalize_session_hints(session_hints)
         self.identity_pool = self._build_identity_pool(pool_size=3)
         self.active_identity_index = 0
@@ -330,6 +340,56 @@ class DownloadM3U8:
         except Exception:
             pass
 
+    def _get_timeout_snapshot(self):
+        with self.state_lock:
+            return self.timeout
+
+    def _adjust_timeout(self, delta, reason):
+        step = int(delta)
+        if step == 0:
+            return False
+        with self.state_lock:
+            old_timeout = self.timeout
+            target_timeout = old_timeout + step
+            target_timeout = max(self.minTimeout, min(self.maxTimeout, target_timeout))
+            if target_timeout == old_timeout:
+                return False
+            self.timeout = target_timeout
+        print(f"\t********timeout adjust ({reason}): {old_timeout} -> {target_timeout}********")
+        return True
+
+    def _compute_retry_budget(self, retries, first_pass_failed_count):
+        try:
+            base_retries = int(retries)
+        except (TypeError, ValueError):
+            base_retries = 10
+        base_retries = max(10, base_retries)
+        total_segments = len(self.fileNameList)
+
+        # 大视频和高失败首轮都允许更多重试，但仍保留硬上限防止无限重试。
+        long_video_bonus = min(20, total_segments // 150)
+        failed_bonus = min(40, max(0, first_pass_failed_count // 6))
+        return min(120, base_retries + long_video_bonus + failed_bonus)
+
+    def _reset_download_runtime_state(self):
+        with self.state_lock:
+            self.connections = 0
+            self.blocking_failures = 0
+            self.total_failures = 0
+            self.timeout = self.minTimeout
+            self.timeout_last_eval_connections = 0
+            self.timeout_last_eval_failures = 0
+            self.timeout_last_adjust_ts = 0.0
+            self.failedNameList.clear()
+            self.failedUrlList.clear()
+
+    def get_failed_segments(self):
+        with self.state_lock:
+            return [
+                {"name": name, "url": url}
+                for name, url in zip(self.failedNameList, self.failedUrlList)
+            ]
+
     def printM3U8(self):
         if self.playlist:
             print(self.playlist.dumps())
@@ -339,7 +399,8 @@ class DownloadM3U8:
         try:
             headers = self._build_request_headers(self.URL, for_playlist=True)
             with self._new_session(headers=headers) as session:
-                response = session.get(self.URL, timeout=(self.timeout, self.timeout))
+                timeout_seconds = self._get_timeout_snapshot()
+                response = session.get(self.URL, timeout=(timeout_seconds, timeout_seconds))
                 response.raise_for_status()
                 try:
                     playlist = m3u8.loads(response.text, uri=self.URL)
@@ -354,7 +415,12 @@ class DownloadM3U8:
                         variant_url = variant.uri
                     if variant_url != "":
                         headers = self._build_request_headers(variant_url, for_playlist=True)
-                        variant_resp = session.get(variant_url, timeout=(self.timeout, self.timeout), headers=headers)
+                        timeout_seconds = self._get_timeout_snapshot()
+                        variant_resp = session.get(
+                            variant_url,
+                            timeout=(timeout_seconds, timeout_seconds),
+                            headers=headers,
+                        )
                         variant_resp.raise_for_status()
                         try:
                             playlist = m3u8.loads(variant_resp.text, uri=variant_url)
@@ -388,7 +454,8 @@ class DownloadM3U8:
             headers = self._build_request_headers(fileUrl)
 
             with self._new_session(headers=headers) as session:
-                response = session.get(fileUrl, timeout=(self.timeout, self.timeout))
+                timeout_seconds = self._get_timeout_snapshot()
+                response = session.get(fileUrl, timeout=(timeout_seconds, timeout_seconds))
                 response.raise_for_status()  # 检查请求状态码，非 2xx 会抛出异常
 
                 # 保存文件
@@ -411,6 +478,7 @@ class DownloadM3U8:
                 self.failedNameList.append(fileName)
                 self.failedUrlList.append(fileUrl)
                 self.connections = self.connections + 1
+                self.total_failures = self.total_failures + 1
                 if status_code in [401, 403, 429]:
                     self.blocking_failures = self.blocking_failures + 1
             # 打印
@@ -418,34 +486,46 @@ class DownloadM3U8:
             self.printInfo(stage, fileName, fileUrl)
 
     def RetryFailed(self, retries=10):
-        # 失败列表最多重试10次
-        # 连续5次失败列表不更新则放弃
         if retries <= 0:
             return
-        failed_time = 0
-        for attempt in range(retries):
-            if len(self.failedNameList) == 0:
+        first_pass_failed_count = len(self.failedNameList)
+        if first_pass_failed_count == 0:
+            return
+
+        max_retry_rounds = self._compute_retry_budget(retries, first_pass_failed_count)
+        stagnation_rounds = 0
+        strong_recovery_rounds = 0
+        stagnation_limit = min(12, max(5, max_retry_rounds // 4))
+        print(
+            f"\n\t********retry budget={max_retry_rounds} "
+            f"(first_pass_failed={first_pass_failed_count}, total={len(self.fileNameList)})********"
+        )
+
+        for attempt in range(max_retry_rounds):
+            with self.state_lock:
+                current_failed_count = len(self.failedNameList)
+            if current_failed_count == 0:
                 break
             self._set_active_identity(attempt + 1)
+            timeout_now = self._get_timeout_snapshot()
             print(
-                f"\n\t********attempt: {attempt + 1}/{retries} failed={len(self.failedNameList)} "
+                f"\n\t********attempt: {attempt + 1}/{max_retry_rounds} failed={current_failed_count} "
                 f"identity={self.active_identity_index + 1}/{len(self.identity_pool)} "
-                f"threads={self.round_threads}********"
+                f"threads={self.round_threads} timeout={timeout_now}s********"
             )
             # 临时存储本次重试开始前的状况
-            failedNameList = self.failedNameList.copy()
-            failedUrlList = self.failedUrlList.copy()
-            self.failedNameList.clear()
-            self.failedUrlList.clear()
             with self.state_lock:
+                failedNameList = self.failedNameList.copy()
+                failedUrlList = self.failedUrlList.copy()
+                self.failedNameList.clear()
+                self.failedUrlList.clear()
                 self.blocking_failures = 0
-            if failed_time > 2:
-                self.timeout = self.timeout + 3
             with ThreadPoolExecutor(max_workers=self.round_threads) as executor:
                 for name, url in zip(failedNameList, failedUrlList):
                     executor.submit(self.__downloadSingle, name, url)
             with self.state_lock:
                 blocking_failures = self.blocking_failures
+                next_failed_count = len(self.failedNameList)
             if blocking_failures > 0 and self.round_threads > 8:
                 old_threads = self.round_threads
                 self.round_threads = max(8, int(self.round_threads * 0.7))
@@ -453,13 +533,38 @@ class DownloadM3U8:
                     f"\tblocking-like failures={blocking_failures}, "
                     f"reduce threads {old_threads} -> {self.round_threads}"
                 )
-            if len(self.failedNameList) == len(failedNameList):
-                failed_time = failed_time + 1
-            elif len(self.failedNameList) >= len(failedNameList):
+
+            if next_failed_count > current_failed_count:
                 print("\t????unexpected error: failedList increased????")
+                stagnation_rounds = stagnation_rounds + 1
+                strong_recovery_rounds = 0
             else:
-                failed_time = 1
-            if failed_time >= 5:
+                recovered_count = current_failed_count - next_failed_count
+                recovered_ratio = recovered_count / max(1, current_failed_count)
+                print(
+                    f"\tretry round result: recovered={recovered_count}/{current_failed_count}, "
+                    f"remaining={next_failed_count}"
+                )
+                if recovered_count <= 0:
+                    stagnation_rounds = stagnation_rounds + 1
+                    strong_recovery_rounds = 0
+                    if stagnation_rounds >= 2:
+                        self._adjust_timeout(+1, f"retry stagnation x{stagnation_rounds}")
+                else:
+                    stagnation_rounds = 0
+                    if recovered_ratio >= 0.35:
+                        strong_recovery_rounds = strong_recovery_rounds + 1
+                        if strong_recovery_rounds >= 3:
+                            if self._adjust_timeout(-1, "retry recovery"):
+                                strong_recovery_rounds = 0
+                    else:
+                        strong_recovery_rounds = 0
+
+            if stagnation_rounds >= stagnation_limit:
+                print(
+                    f"\tstop retry early: stagnation={stagnation_rounds} "
+                    f">= limit={stagnation_limit}, remaining={next_failed_count}"
+                )
                 break
 
     def WriteM3U8(self):
@@ -470,6 +575,7 @@ class DownloadM3U8:
 
     def DonwloadAndWrite(self, retries=10):
         # 启动定时器
+        self._reset_download_runtime_state()
         self.timeoutTimer.StartTimer()
         self.round_threads = self.threadNum
         self._set_active_identity(0)
@@ -499,23 +605,34 @@ class DownloadM3U8:
         self.WriteM3U8()
 
     def TimeoutAdapting(self):
+        now = time.time()
         with self.state_lock:
             connections = self.connections
-            failed_count = len(self.failedNameList)
+            total_failures = self.total_failures
+            last_eval_connections = self.timeout_last_eval_connections
+            last_eval_failures = self.timeout_last_eval_failures
+            last_adjust_ts = self.timeout_last_adjust_ts
 
-        if connections < 15:
+        if connections < self.timeout_min_observations:
             return
-        if self.timeout >= self.maxTimeout:
-            print("\t********bad connection********")
+        if now - last_adjust_ts < self.timeout_adjust_cooldown:
             return
-        failed_ratio = failed_count / connections
-        if failed_ratio > self.threshold:
-            print(
-                f"\t********failed% = {failed_ratio} = {failed_count}/{connections} > {self.threshold}"
-            )
-            print(f"\t********changing timeout from {self.timeout} to {self.timeout + 3}********")
-            self.timeout = self.timeout + 3
-            time.sleep(10)
+
+        delta_connections = connections - last_eval_connections
+        delta_failures = total_failures - last_eval_failures
+        if delta_connections < self.timeout_min_observations:
+            return
+
+        recent_failed_ratio = delta_failures / max(1, delta_connections)
+        if recent_failed_ratio >= self.timeout_raise_threshold:
+            self._adjust_timeout(+self.timeout_step_up, f"recent failed ratio={recent_failed_ratio:.2f}")
+        elif recent_failed_ratio <= self.timeout_recover_threshold:
+            self._adjust_timeout(-self.timeout_step_down, f"recent failed ratio={recent_failed_ratio:.2f}")
+
+        with self.state_lock:
+            self.timeout_last_eval_connections = self.connections
+            self.timeout_last_eval_failures = self.total_failures
+            self.timeout_last_adjust_ts = now
 
     def writeVideoBat(self, fileName="output", extension=".mp4"):
         indexPath = os.path.join(self.tempDir, "index.m3u8")

@@ -582,6 +582,10 @@ class Worker(QThread):
                 current_urls = list(dict.fromkeys(current_urls))
 
                 # 保存下载列表
+                completion_policy = {
+                    "maxMissingSegments": 2,
+                    "minSuccessRatio": 0.995,
+                }
                 d_config = {
                     "URL": url,
                     "folder": folder,
@@ -605,8 +609,25 @@ class Worker(QThread):
                     "monitorInteraction": monitor_config.get("interaction_enabled", True),
                     "monitorHeadless": monitor_config["headless"],
                     "monitorRulesPath": monitor_config.get("rules_path", ""),
+                    "segmentCompletionPolicy": completion_policy,
                 }
                 d = {"Config": d_config}
+
+                def build_candidate_log_item(candidate_url):
+                    return {
+                        "url": candidate_url,
+                        "completed": False,
+                        "completedByTolerance": False,
+                        "mergeCompleted": False,
+                        "hasMissingSegments": False,
+                        "segmentStats": {
+                            "total": 0,
+                            "downloaded": 0,
+                            "failed": 0,
+                        },
+                        "failedSegments": [],
+                        "status": "pending",
+                    }
 
                 # 中断检查
                 if self._is_interrupted:
@@ -617,7 +638,7 @@ class Worker(QThread):
 
                 candidate_count = len(current_urls)
                 for index, i_url in enumerate(current_urls):
-                    d[str(index)] = {"url": i_url, "completed": False}
+                    d[str(index)] = build_candidate_log_item(i_url)
                 DownloadJson(d, filePath=json_path).write()
 
                 if candidate_count <= 0:
@@ -688,7 +709,17 @@ class Worker(QThread):
                         break
 
                     completed = False
+                    merge_completed = False
+                    has_missing_segments = False
+                    completed_by_tolerance = False
+                    failed_segments_for_log = []
+                    total_segments = 0
+                    downloaded_segments = 0
+                    success_ratio = 0.0
+                    missing_ratio = 0.0
+                    status = "pending"
                     if download_mode == 0:
+                        status = "skipped_no_download"
                         update_candidate_progress(i, 1.0)
                     else:
                         self.downloadProgressChanged.emit(0)
@@ -732,19 +763,60 @@ class Worker(QThread):
                         if x is not None:
                             x.DonwloadAndWrite()
 
-                            success_segments = len(x.fileNameList) - len(x.failedNameList)
+                            total_segments = len(x.fileNameList)
+                            failed_segments_for_log = x.get_failed_segments()
+                            failed_segments_count = len(failed_segments_for_log)
+                            downloaded_segments = max(0, total_segments - failed_segments_count)
+                            has_missing_segments = failed_segments_count > 0
+                            if total_segments > 0:
+                                success_ratio = downloaded_segments / total_segments
+                                missing_ratio = failed_segments_count / total_segments
+                            success_segments = downloaded_segments
                             if success_segments <= 0:
+                                status = "no_downloadable_segments"
                                 print("\n********skip ffmpeg: no downloadable segments********\n")
                             else:
                                 print(f"\n********starting to generate {file_ext_text}********")
                                 ffmpeg_ok = x.process_video_with_ffmpeg(this_filename, file_ext_text)
+                                merge_completed = ffmpeg_ok
                                 if ffmpeg_ok:
-                                    completed = True
-                                    successful_videos += 1
-                                    print(f"\n********{file_ext_text} completed generating********\n\n")
+                                    if has_missing_segments:
+                                        tolerable_missing = (
+                                            failed_segments_count <= completion_policy["maxMissingSegments"]
+                                            or success_ratio >= completion_policy["minSuccessRatio"]
+                                        )
+                                        if tolerable_missing:
+                                            completed = True
+                                            completed_by_tolerance = True
+                                            successful_videos += 1
+                                            status = "completed_with_tolerated_missing_segments"
+                                            print(
+                                                "\n********merged with tolerated missing segments; mark as completed********\n"
+                                            )
+                                            print(
+                                                f"[download] tolerated missing segments={failed_segments_count}, "
+                                                f"success_ratio={success_ratio:.4f}, log={json_path}"
+                                            )
+                                        else:
+                                            status = "merged_with_missing_segments"
+                                            print(
+                                                "\n********merged but missing segments exceed tolerance; "
+                                                "keep task as uncompleted********\n"
+                                            )
+                                            print(
+                                                f"[download] remaining failed segments={failed_segments_count}, "
+                                                f"success_ratio={success_ratio:.4f}, log={json_path}"
+                                            )
+                                    else:
+                                        completed = True
+                                        successful_videos += 1
+                                        status = "completed"
+                                        print(f"\n********{file_ext_text} completed generating********\n\n")
                                 else:
+                                    status = "ffmpeg_failed"
                                     print("\n********ffmpeg failed; continue next candidate********\n")
                         else:
+                            status = "invalid_m3u8"
                             if success_target is not None:
                                 update_quota_progress(0.0)
 
@@ -754,7 +826,24 @@ class Worker(QThread):
                             push_download_ratio(successful_videos / planned_successes)
 
                     if download_list:
-                        d[str(i)] = {"url": i_url, "completed": completed}
+                        d[str(i)] = {
+                            "url": i_url,
+                            "completed": completed,
+                            "completedByTolerance": completed_by_tolerance,
+                            "mergeCompleted": merge_completed,
+                            "hasMissingSegments": has_missing_segments,
+                            "segmentStats": {
+                                "total": total_segments,
+                                "downloaded": downloaded_segments,
+                                "failed": len(failed_segments_for_log),
+                            },
+                            "completionMetrics": {
+                                "successRatio": round(success_ratio, 6),
+                                "missingRatio": round(missing_ratio, 6),
+                            },
+                            "failedSegments": failed_segments_for_log,
+                            "status": status,
+                        }
                     DownloadJson(d, filePath=json_path).write()
                     processed_index = i
 
@@ -763,6 +852,11 @@ class Worker(QThread):
                         f"[task] success target reached ({successful_videos}/{planned_successes}), "
                         f"skip remaining downloads={candidate_count - (processed_index + 1)}"
                     )
+                    for idx in range(processed_index + 1, candidate_count):
+                        key = str(idx)
+                        if key in d and isinstance(d[key], dict):
+                            d[key]["status"] = "skipped_target_reached"
+                    DownloadJson(d, filePath=json_path).write()
                     push_download_ratio(1.0)
 
                 if success_target is None:

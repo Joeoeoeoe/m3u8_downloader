@@ -111,7 +111,16 @@ class ReadDownloadJson(JsonProcessor):
         digitIndex = [key for key in list(self.data.keys()) if key.isdigit()]
         for i in digitIndex:
             item = self.data[i]
-            self.completed.append(item['url'])  if item['completed'] else self.uncompleted.append(item['url'])
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get('url', '')).strip()
+            if url == '':
+                continue
+            completed = bool(item.get('completed', False))
+            if completed:
+                self.completed.append(url)
+            else:
+                self.uncompleted.append(url)
 
     def write(self):
         print("not allowed to use method 'write'")
