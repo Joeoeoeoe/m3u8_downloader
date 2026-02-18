@@ -3,7 +3,7 @@ import shutil
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import quote, urlparse
 
 import m3u8
@@ -22,6 +22,7 @@ class DownloadM3U8:
         proxy_config=None,
         session_hints=None,
         progress_callback=None,
+        stop_checker=None,
     ):
         # 文件夹
         self.fileDir = folder
@@ -77,6 +78,10 @@ class DownloadM3U8:
         self.identity_pool = self._build_identity_pool(pool_size=3)
         self.active_identity_index = 0
         self.progress_callback = progress_callback if callable(progress_callback) else None
+        self.stop_checker = stop_checker if callable(stop_checker) else None
+        self._manual_stop_requested = False
+        self.download_interrupted = False
+        self._stop_logged = False
         self.completedNameSet = set()
         print(f"[download][init] identity_pool_size={len(self.identity_pool)}")
 
@@ -352,6 +357,64 @@ class DownloadM3U8:
         except Exception:
             pass
 
+    def request_stop(self):
+        self._manual_stop_requested = True
+        self._mark_interrupted("manual")
+
+    def was_interrupted(self):
+        with self.state_lock:
+            return self.download_interrupted
+
+    def _mark_interrupted(self, reason=""):
+        should_log = False
+        with self.state_lock:
+            self.download_interrupted = True
+            if not self._stop_logged:
+                self._stop_logged = True
+                should_log = True
+        if should_log:
+            suffix = f" reason={reason}" if reason else ""
+            print(f"[download][interrupt] requested{suffix}")
+
+    def _is_stop_requested(self):
+        external_requested = False
+        if self.stop_checker is not None:
+            try:
+                external_requested = bool(self.stop_checker())
+            except Exception:
+                external_requested = False
+        if self._manual_stop_requested or external_requested:
+            self._mark_interrupted("external" if external_requested else "manual")
+            return True
+        return False
+
+    def _run_download_tasks(self, download_items):
+        if len(download_items) == 0:
+            return
+        executor = ThreadPoolExecutor(max_workers=max(1, int(self.round_threads)))
+        pending_futures = set()
+        try:
+            for name, url in download_items:
+                if self._is_stop_requested():
+                    break
+                pending_futures.add(executor.submit(self.__downloadSingle, name, url))
+
+            while len(pending_futures) > 0:
+                if self._is_stop_requested():
+                    for future in pending_futures:
+                        future.cancel()
+                    break
+                done, pending_futures = wait(pending_futures, timeout=0.2, return_when=FIRST_COMPLETED)
+                if len(done) == 0:
+                    continue
+                for future in done:
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        print(f"[error][segment] unexpected worker exception: {exc}")
+        finally:
+            executor.shutdown(wait=True)
+
     def _get_timeout_snapshot(self):
         with self.state_lock:
             return self.timeout
@@ -392,6 +455,9 @@ class DownloadM3U8:
             self.timeout_last_eval_connections = 0
             self.timeout_last_eval_failures = 0
             self.timeout_last_adjust_ts = 0.0
+            self._manual_stop_requested = False
+            self.download_interrupted = False
+            self._stop_logged = False
             self.failedNameList.clear()
             self.failedUrlList.clear()
 
@@ -408,9 +474,13 @@ class DownloadM3U8:
 
     def prepareDownload(self):
         self.printInfo("getting", "*.m3u8", self.URL)
+        if self._is_stop_requested():
+            return
         try:
             headers = self._build_request_headers(self.URL, for_playlist=True)
             with self._new_session(headers=headers) as session:
+                if self._is_stop_requested():
+                    return
                 timeout_seconds = self._get_timeout_snapshot()
                 response = session.get(self.URL, timeout=(timeout_seconds, timeout_seconds))
                 response.raise_for_status()
@@ -426,6 +496,8 @@ class DownloadM3U8:
                     if variant_url == "" and getattr(variant, "uri", ""):
                         variant_url = variant.uri
                     if variant_url != "":
+                        if self._is_stop_requested():
+                            return
                         headers = self._build_request_headers(variant_url, for_playlist=True)
                         timeout_seconds = self._get_timeout_snapshot()
                         variant_resp = session.get(
@@ -462,17 +534,30 @@ class DownloadM3U8:
             self.fileNameList.append(segment.uri)
 
     def __downloadSingle(self, fileName, fileUrl):
+        if self._is_stop_requested():
+            return
+        file_path = os.path.join(self.tempDir, fileName)
         try:
             headers = self._build_request_headers(fileUrl)
 
             with self._new_session(headers=headers) as session:
                 timeout_seconds = self._get_timeout_snapshot()
-                response = session.get(fileUrl, timeout=(timeout_seconds, timeout_seconds))
-                response.raise_for_status()  # 检查请求状态码，非 2xx 会抛出异常
+                with session.get(fileUrl, timeout=(timeout_seconds, timeout_seconds), stream=True) as response:
+                    response.raise_for_status()  # 检查请求状态码，非 2xx 会抛出异常
 
-                # 保存文件
-                with open(os.path.join(self.tempDir, fileName), "wb") as file:
-                    file.write(response.content)
+                    # 分块下载，允许在分片下载中快速响应中断。
+                    with open(file_path, "wb") as file:
+                        for chunk in response.iter_content(chunk_size=64 * 1024):
+                            if self._is_stop_requested():
+                                try:
+                                    file.close()
+                                    if os.path.exists(file_path):
+                                        os.remove(file_path)
+                                except OSError:
+                                    pass
+                                return
+                            if chunk:
+                                file.write(chunk)
 
                 # 打印
                 with self.state_lock:
@@ -496,8 +581,17 @@ class DownloadM3U8:
             # 打印
             stage = f"failed[{status_code}]: {e}" if status_code is not None else f"failed: {e}"
             self.printInfo(stage, fileName, fileUrl)
+        except Exception as e:
+            with self.state_lock:
+                self.failedNameList.append(fileName)
+                self.failedUrlList.append(fileUrl)
+                self.connections = self.connections + 1
+                self.total_failures = self.total_failures + 1
+            self.printInfo(f"failed: {e}", fileName, fileUrl)
 
     def RetryFailed(self, retries=10):
+        if self._is_stop_requested():
+            return
         if retries <= 0:
             return
         first_pass_failed_count = len(self.failedNameList)
@@ -514,6 +608,9 @@ class DownloadM3U8:
         )
 
         for attempt in range(max_retry_rounds):
+            if self._is_stop_requested():
+                print("[retry] interrupted, stop retry rounds")
+                break
             with self.state_lock:
                 current_failed_count = len(self.failedNameList)
             if current_failed_count == 0:
@@ -532,9 +629,7 @@ class DownloadM3U8:
                 self.failedNameList.clear()
                 self.failedUrlList.clear()
                 self.blocking_failures = 0
-            with ThreadPoolExecutor(max_workers=self.round_threads) as executor:
-                for name, url in zip(failedNameList, failedUrlList):
-                    executor.submit(self.__downloadSingle, name, url)
+            self._run_download_tasks(list(zip(failedNameList, failedUrlList)))
             with self.state_lock:
                 blocking_failures = self.blocking_failures
                 next_failed_count = len(self.failedNameList)
@@ -580,6 +675,8 @@ class DownloadM3U8:
                 break
 
     def WriteM3U8(self):
+        if self.playlist is None:
+            return
         # 将m3u8索引文件写入本地
         self.playlist.segments[:] = [seg for seg in self.playlist.segments if seg.uri not in self.failedNameList]
         with open(os.path.join(self.tempDir, "index.m3u8"), "w", encoding="utf-8") as f:
@@ -588,35 +685,43 @@ class DownloadM3U8:
     def DonwloadAndWrite(self, retries=10):
         # 启动定时器
         self._reset_download_runtime_state()
-        self.timeoutTimer.StartTimer()
         self.round_threads = self.threadNum
         self._set_active_identity(0)
         self.completedNameSet.clear()
         total_segments = len(self.fileNameList)
         self._emit_progress("start", done=0, total=total_segments)
 
-        # 下载和写List中的文件
-        print(f"[download] total_segments={len(self.fileNameList)}")
-        with ThreadPoolExecutor(max_workers=self.round_threads) as executor:
-            for name, url in zip(self.fileNameList, self.fileUrlList):
-                executor.submit(self.__downloadSingle, name, url)
+        self.timeoutTimer.StartTimer()
+        try:
+            # 下载和写List中的文件
+            print(f"[download] total_segments={len(self.fileNameList)}")
+            self._run_download_tasks(list(zip(self.fileNameList, self.fileUrlList)))
 
-        # 重新下载和写failedList中的文件
-        self.RetryFailed(retries)
+            # 重新下载和写failedList中的文件
+            if not self._is_stop_requested():
+                self.RetryFailed(retries)
+            else:
+                print("[download] interrupted before retry stage")
 
-        # 结束定时器
-        self.timeoutTimer.StopTimer()
-        self._emit_progress(
-            "done",
-            done=len(self.completedNameSet),
-            total=total_segments,
-            failed=len(self.failedNameList),
-        )
-
-        # 写index.m3u8 - 删除无效文件
-        self.WriteM3U8()
+            if self.was_interrupted():
+                print("[download] interrupted, skip index.m3u8 writing")
+            else:
+                # 写index.m3u8 - 删除无效文件
+                self.WriteM3U8()
+        finally:
+            # 结束定时器
+            self.timeoutTimer.StopTimer()
+            self._emit_progress(
+                "done",
+                done=len(self.completedNameSet),
+                total=total_segments,
+                failed=len(self.failedNameList),
+                interrupted=self.was_interrupted(),
+            )
 
     def TimeoutAdapting(self):
+        if self._is_stop_requested():
+            return
         now = time.time()
         with self.state_lock:
             connections = self.connections
