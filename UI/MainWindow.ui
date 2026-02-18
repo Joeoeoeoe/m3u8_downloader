@@ -312,24 +312,6 @@
             </spacer>
            </item>
            <item>
-            <widget class="QPushButton" name="configButton">
-             <property name="sizePolicy">
-              <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
-               <horstretch>0</horstretch>
-               <verstretch>0</verstretch>
-              </sizepolicy>
-             </property>
-             <property name="font">
-              <font>
-               <pointsize>9</pointsize>
-              </font>
-             </property>
-             <property name="text">
-              <string>配置</string>
-             </property>
-            </widget>
-           </item>
-           <item>
             <widget class="QPushButton" name="startButton">
              <property name="sizePolicy">
               <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
@@ -371,6 +353,54 @@
              </property>
              <property name="text">
               <string>终止</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <spacer name="horizontalSpacer_5">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size>
+               <width>40</width>
+               <height>20</height>
+              </size>
+             </property>
+            </spacer>
+           </item>
+           <item>
+            <widget class="QPushButton" name="configButton">
+             <property name="sizePolicy">
+              <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+               <horstretch>0</horstretch>
+               <verstretch>0</verstretch>
+              </sizepolicy>
+             </property>
+             <property name="font">
+              <font>
+               <pointsize>9</pointsize>
+              </font>
+             </property>
+             <property name="styleSheet">
+              <string notr="true">QPushButton#configButton {
+    background-color: #fdfdfd;      /* 极浅的底色 */
+    border: 1px solid #dcdfe6;      /* 浅灰色边框 */
+    color: #606266;                 /* 莫兰迪深灰色字体 */
+    
+    font-size: 9pt;
+    padding: 3px 12px;
+    border-radius: 6px;             /* 圆角加大一点，更圆润治愈 */
+}
+
+QPushButton#configButton:hover {
+    background-color: #f5f7fa;      /* 悬停时淡淡的灰色 */
+    color: #409eff;                 /* 悬停时文字变蓝，作为交互反馈 */
+    border-color: #d1e5ff;
+}</string>
+             </property>
+             <property name="text">
+              <string>配置</string>
              </property>
             </widget>
            </item>
@@ -434,6 +464,9 @@
              <bold>true</bold>
              <underline>true</underline>
             </font>
+           </property>
+           <property name="styleSheet">
+            <string notr="true"/>
            </property>
            <property name="text">
             <string>进度表</string>

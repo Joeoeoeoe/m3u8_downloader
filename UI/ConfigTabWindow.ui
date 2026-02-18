@@ -490,14 +490,14 @@
              <string>递归探测层数</string>
             </property>
             <property name="checked">
-             <bool>true</bool>
+             <bool>false</bool>
             </property>
            </widget>
           </item>
           <item>
            <widget class="QSpinBox" name="deepSpinBox">
             <property name="enabled">
-             <bool>true</bool>
+             <bool>false</bool>
             </property>
             <property name="font">
              <font>
@@ -573,7 +573,7 @@
              <number>1</number>
             </property>
             <property name="value">
-             <number>3</number>
+             <number>2</number>
             </property>
            </widget>
           </item>

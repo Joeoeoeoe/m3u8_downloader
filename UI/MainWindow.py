@@ -183,17 +183,6 @@ class Ui_MainWindow(object):
         self.horizontalLayout.setObjectName("horizontalLayout")
         spacerItem = QtWidgets.QSpacerItem(40, 20, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
         self.horizontalLayout.addItem(spacerItem)
-        self.configButton = QtWidgets.QPushButton(self.frameDownload)
-        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
-        sizePolicy.setHorizontalStretch(0)
-        sizePolicy.setVerticalStretch(0)
-        sizePolicy.setHeightForWidth(self.configButton.sizePolicy().hasHeightForWidth())
-        self.configButton.setSizePolicy(sizePolicy)
-        font = QtGui.QFont()
-        font.setPointSize(9)
-        self.configButton.setFont(font)
-        self.configButton.setObjectName("configButton")
-        self.horizontalLayout.addWidget(self.configButton)
         self.startButton = QtWidgets.QPushButton(self.frameDownload)
         sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
         sizePolicy.setHorizontalStretch(0)
@@ -219,6 +208,34 @@ class Ui_MainWindow(object):
         self.horizontalLayout.addWidget(self.stopButton)
         spacerItem1 = QtWidgets.QSpacerItem(40, 20, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
         self.horizontalLayout.addItem(spacerItem1)
+        self.configButton = QtWidgets.QPushButton(self.frameDownload)
+        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
+        sizePolicy.setHorizontalStretch(0)
+        sizePolicy.setVerticalStretch(0)
+        sizePolicy.setHeightForWidth(self.configButton.sizePolicy().hasHeightForWidth())
+        self.configButton.setSizePolicy(sizePolicy)
+        font = QtGui.QFont()
+        font.setPointSize(9)
+        self.configButton.setFont(font)
+        self.configButton.setStyleSheet("QPushButton#configButton {\n"
+"    background-color: #fdfdfd;      /* 极浅的底色 */\n"
+"    border: 1px solid #dcdfe6;      /* 浅灰色边框 */\n"
+"    color: #606266;                 /* 莫兰迪深灰色字体 */\n"
+"    \n"
+"    font-size: 9pt;\n"
+"    padding: 3px 12px;\n"
+"    border-radius: 6px;             /* 圆角加大一点，更圆润治愈 */\n"
+"}\n"
+"\n"
+"QPushButton#configButton:hover {\n"
+"    background-color: #f5f7fa;      /* 悬停时淡淡的灰色 */\n"
+"    color: #409eff;                 /* 悬停时文字变蓝，作为交互反馈 */\n"
+"    border-color: #d1e5ff;\n"
+"}")
+        self.configButton.setObjectName("configButton")
+        self.horizontalLayout.addWidget(self.configButton)
+        spacerItem2 = QtWidgets.QSpacerItem(40, 20, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
+        self.horizontalLayout.addItem(spacerItem2)
         self.verticalLayout_6.addLayout(self.horizontalLayout)
         self.verticalLayout_8.addLayout(self.verticalLayout_6)
         self.verticalLayout_9.addWidget(self.frameDownload)
@@ -244,6 +261,7 @@ class Ui_MainWindow(object):
         font.setUnderline(True)
         font.setWeight(75)
         self.progressLabel.setFont(font)
+        self.progressLabel.setStyleSheet("")
         self.progressLabel.setAlignment(QtCore.Qt.AlignCenter)
         self.progressLabel.setObjectName("progressLabel")
         self.verticalLayout_7.addWidget(self.progressLabel)
@@ -308,8 +326,8 @@ class Ui_MainWindow(object):
         self.verticalLayout_3.setObjectName("verticalLayout_3")
         self.horizontalLayout_3 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_3.setObjectName("horizontalLayout_3")
-        spacerItem2 = QtWidgets.QSpacerItem(40, 20, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
-        self.horizontalLayout_3.addItem(spacerItem2)
+        spacerItem3 = QtWidgets.QSpacerItem(40, 20, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
+        self.horizontalLayout_3.addItem(spacerItem3)
         self.cleanLogCheckBox = QtWidgets.QCheckBox(self.frameLogging)
         self.cleanLogCheckBox.setChecked(True)
         self.cleanLogCheckBox.setObjectName("cleanLogCheckBox")
@@ -355,11 +373,11 @@ class Ui_MainWindow(object):
         self.openFolderButton.setText(_translate("MainWindow", "..."))
         self.fileDownloadLabel.setText(_translate("MainWindow", "文件批量链接下载"))
         self.openFileButton.setText(_translate("MainWindow", "加载下载列表"))
-        self.configButton.setText(_translate("MainWindow", "配置"))
         self.startButton.setText(_translate("MainWindow", "开始"))
         self.startButton.setShortcut(_translate("MainWindow", "Ctrl+Return"))
         self.clearButton.setText(_translate("MainWindow", "清空"))
         self.stopButton.setText(_translate("MainWindow", "终止"))
+        self.configButton.setText(_translate("MainWindow", "配置"))
         self.progressLabel.setText(_translate("MainWindow", "进度表"))
         self.monitorProgressLabel.setText(_translate("MainWindow", "查找进度："))
         self.downloadProgressLabel.setText(_translate("MainWindow", "下载进度："))

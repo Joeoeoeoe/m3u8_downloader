@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import threading
+import time
 from datetime import datetime
 
 # ui
@@ -59,10 +60,10 @@ def default_config():
         "filename": "output",
         "fileExt": 0,
         "fileExtText": FILE_EXT_OPTIONS[0],
-        "recursionEnabled": True,
+        "recursionEnabled": False,
         "recursionDepth": 2,
         "monitorTryEnabled": True,
-        "monitorTries": 3,
+        "monitorTries": 2,
         "monitorInteraction": True,
         "downloadList": True,
         "downloadMode": 1,
@@ -533,7 +534,7 @@ class Worker(QThread):
         self.monitorConfig = {
             "headless": _to_bool(config.get("monitorHeadless", True), True),
             "rules_path": _to_text(config.get("monitorRulesPath", "")),
-            "tries": _to_int(config.get("monitorTries", 3), 3, 1, 5),
+            "tries": _to_int(config.get("monitorTries", 2), 2, 1, 5),
             "interaction_enabled": _to_bool(config.get("monitorInteraction", True), True),
         }
         self.monitorTryEnabled = _to_bool(config.get("monitorTryEnabled", True), True)
@@ -577,6 +578,75 @@ class Worker(QThread):
         except Exception:
             pass
 
+    @staticmethod
+    def _try_load_latest_config_snapshot(retries=3, retry_interval=0.05):
+        config_path = os.path.join(os.getcwd(), "config", "config.json")
+        for _ in range(max(1, retries)):
+            try:
+                with open(config_path, "r", encoding="utf-8") as file:
+                    payload = json.load(file)
+                if isinstance(payload, dict):
+                    return normalize_config_dict(payload)
+            except Exception:
+                pass
+            time.sleep(max(0.0, float(retry_interval)))
+        return None
+
+    def _runtime_settings_for_task(self):
+        runtime = {
+            "recursion_enabled": self.recursionEnabled,
+            "recursion_depth": self.recursionDepth,
+            "download_mode": self.downloadMode,
+            "download_mode_text": self.downloadModeText,
+            "max_parallel": self.maxParallel,
+            "monitor_try_enabled": self.monitorTryEnabled,
+            "proxy_config": dict(self.proxyConfig),
+            "monitor_config": dict(self.monitorConfig),
+        }
+        latest = self._try_load_latest_config_snapshot()
+        if latest is None:
+            return runtime, False
+
+        recursion_enabled = _to_bool(latest.get("recursionEnabled", runtime["recursion_enabled"]), True)
+        recursion_depth = _to_int(latest.get("recursionDepth", runtime["recursion_depth"]), runtime["recursion_depth"], 1, 6)
+        if not recursion_enabled:
+            recursion_depth = 1
+        monitor_try_enabled = _to_bool(latest.get("monitorTryEnabled", runtime["monitor_try_enabled"]), True)
+        monitor_config = {
+            "headless": _to_bool(latest.get("monitorHeadless", runtime["monitor_config"]["headless"]), True),
+            "rules_path": _to_text(latest.get("monitorRulesPath", runtime["monitor_config"].get("rules_path", ""))),
+            "tries": _to_int(latest.get("monitorTries", runtime["monitor_config"].get("tries", 2)), 2, 1, 5),
+            "interaction_enabled": _to_bool(
+                latest.get("monitorInteraction", runtime["monitor_config"].get("interaction_enabled", True)),
+                True,
+            ),
+        }
+        if not monitor_try_enabled:
+            monitor_config["tries"] = 1
+
+        runtime["recursion_enabled"] = recursion_enabled
+        runtime["recursion_depth"] = recursion_depth
+        runtime["download_mode"] = _to_int(
+            latest.get("downloadMode", runtime["download_mode"]),
+            runtime["download_mode"],
+            0,
+            len(DOWNLOAD_MODE_OPTIONS) - 1,
+        )
+        runtime["download_mode_text"] = DOWNLOAD_MODE_OPTIONS[runtime["download_mode"]]
+        runtime["max_parallel"] = _to_int(latest.get("maxParallel", runtime["max_parallel"]), runtime["max_parallel"], 1, 999)
+        runtime["monitor_try_enabled"] = monitor_try_enabled
+        runtime["monitor_config"] = monitor_config
+        runtime["proxy_config"] = _build_proxy_config(
+            {
+                "proxyEnabled": latest.get("proxyEnabled", runtime["proxy_config"]["enabled"]),
+                "proxyAddress": latest.get("proxyAddress", runtime["proxy_config"]["address"]),
+                "proxyPort": latest.get("proxyPort", runtime["proxy_config"]["port"]),
+                "proxyUser": latest.get("proxyUser", runtime["proxy_config"]["username"]),
+                "proxyPassword": latest.get("proxyPassword", runtime["proxy_config"]["password"]),
+            }
+        )
+        return runtime, True
+
     def _emit_general_progress(self, task_index, task_total, task_progress):
         if task_total <= 0:
             self.generalProgressChanged.emit(0)
@@ -613,13 +683,8 @@ class Worker(QThread):
             recursion_enabled = self.recursionEnabled
             recursion_depth = self.recursionDepth
             download_list = self.downloadList
-            download_mode, download_mode_text = self.downloadMode, self.downloadModeText
             list_mode = self.listMode
             list_mode_text = self.listModeText
-            max_parallel = self.maxParallel
-            monitor_try_enabled = self.monitorTryEnabled
-            proxy_config = self.proxyConfig
-            monitor_config = dict(self.monitorConfig)
 
             # 开始下载数据
             if url_input == "":
@@ -644,7 +709,15 @@ class Worker(QThread):
                 if total_targets > preview_count:
                     print(f"[task] ... {total_targets - preview_count} more targets")
 
-            def run_url(url, this_filename, task_index, task_total):
+            def run_url(url, this_filename, task_index, task_total, task_runtime):
+                recursion_enabled = task_runtime["recursion_enabled"]
+                recursion_depth = task_runtime["recursion_depth"]
+                download_mode = task_runtime["download_mode"]
+                download_mode_text = task_runtime["download_mode_text"]
+                max_parallel = task_runtime["max_parallel"]
+                monitor_try_enabled = task_runtime["monitor_try_enabled"]
+                proxy_config = task_runtime["proxy_config"]
+                monitor_config = task_runtime["monitor_config"]
                 current_urls = []
                 monitor_session_hints = {}
                 json_path, log_path = self._task_output_paths()
@@ -1116,11 +1189,25 @@ class Worker(QThread):
 
             for task_index, (url, match_str) in enumerate(urls_and_strings, start=1):
                 # 地址范围中的每个url 不是一个url中识别到的所有m3u8视频
+                task_runtime, used_latest_config = self._runtime_settings_for_task()
+                if used_latest_config:
+                    print(
+                        f"[task {task_index}/{total_tasks}] runtime config refreshed: "
+                        f"mode={task_runtime['download_mode_text']} "
+                        f"depth={task_runtime['recursion_depth']} "
+                        f"parallel={task_runtime['max_parallel']}"
+                    )
+                else:
+                    print(
+                        f"[task {task_index}/{total_tasks}] runtime config refresh failed, "
+                        "continue with worker snapshot"
+                    )
                 run_url(
                     url,
                     f"{filename}_{match_str}" if match_str != "" else filename,
                     task_index,
                     total_tasks,
+                    task_runtime,
                 )
                 if self._stop_requested():
                     break
@@ -1203,8 +1290,6 @@ class MyConfigWindow(QMainWindow):
 
     def on_recursionCheckBox_toggled(self, checked):
         self.ui.deepSpinBox.setEnabled(checked)
-        if not checked:
-            self.ui.deepSpinBox.setValue(1)
 
     def on_attemptCheckBox_toggled(self, checked):
         self.ui.attemptSpinBox.setEnabled(checked)
@@ -1251,7 +1336,7 @@ class MyConfigWindow(QMainWindow):
         self.ui.recursionCheckBox.setChecked(normalized["recursionEnabled"])
         self.ui.deepSpinBox.setValue(normalized["recursionDepth"])
         self.ui.attemptCheckBox.setChecked(normalized.get("monitorTryEnabled", True))
-        self.ui.attemptSpinBox.setValue(normalized.get("monitorTries", 3))
+        self.ui.attemptSpinBox.setValue(normalized.get("monitorTries", 2))
         self.ui.interactionCheckBox.setChecked(normalized.get("monitorInteraction", True))
         self.ui.headlessCheckBox.setChecked(normalized["monitorHeadless"])
         self.ui.downloadModeCombo.setCurrentIndex(normalized["downloadMode"])
@@ -1289,7 +1374,7 @@ class MyConfigWindow(QMainWindow):
             self.ui.recursionCheckBox.setChecked(config["recursionEnabled"])
             self.ui.deepSpinBox.setValue(config["recursionDepth"])
             self.ui.attemptCheckBox.setChecked(config.get("monitorTryEnabled", True))
-            self.ui.attemptSpinBox.setValue(config.get("monitorTries", 3))
+            self.ui.attemptSpinBox.setValue(config.get("monitorTries", 2))
             self.ui.interactionCheckBox.setChecked(config.get("monitorInteraction", True))
             self.ui.downloadModeCombo.setCurrentIndex(config["downloadMode"])
             self.ui.stopModeCombo.setCurrentIndex(config["stopMode"])
@@ -1490,7 +1575,7 @@ class MyWindow(QMainWindow):
         self.ui.folderEdit.textChanged.connect(self.on_folderEdit_textChanged)
         self.ui.filenameEdit.textChanged.connect(self.on_filenameEdit_textChanged)
 
-        self.ui.clearButton.setVisible(False)
+        self.ui.clearButton.setVisible(True)
         self.ui.monitorProgressBar.setValue(0)
         self.ui.downloadProgressBar.setValue(0)
         self.ui.generalProgressBar.setValue(0)
@@ -1571,12 +1656,8 @@ class MyWindow(QMainWindow):
         result = _resolve_directory_input(self.ui.folderEdit.text(), self._default_folder, create=False)
         if result["ok"]:
             self.ui.folderEdit.setStyleSheet("")
-            display_path = result["path"] if self.ui.folderEdit.text().strip() != "" else self._default_folder
-            self.ui.folderEdit.setToolTip(self._append_hint(self._folder_tooltip_prefix, display_path))
         else:
             self.ui.folderEdit.setStyleSheet("border: 1px solid #d9534f;")
-            reason = result.get("reason", "directory is invalid")
-            self.ui.folderEdit.setToolTip(self._append_hint(self._folder_tooltip_prefix, f"无效目录: {reason}"))
 
         can_start = result["ok"] and not (self.worker is not None and self.worker.isRunning())
         self.ui.startButton.setEnabled(can_start)
@@ -1672,7 +1753,7 @@ class MyWindow(QMainWindow):
                 "proxyPassword": run_config["proxyPassword"],
                 "maxParallel": run_config["maxParallel"],
                 "monitorTryEnabled": run_config.get("monitorTryEnabled", True),
-                "monitorTries": run_config.get("monitorTries", 3),
+                "monitorTries": run_config.get("monitorTries", 2),
                 "monitorInteraction": run_config.get("monitorInteraction", True),
                 "monitorHeadless": run_config["monitorHeadless"],
                 "monitorRulesPath": run_config.get("monitorRulesPath", ""),
@@ -1721,7 +1802,7 @@ class MyWindow(QMainWindow):
             "proxyPassword": config["proxyPassword"],
             "maxParallel": config["maxParallel"],
             "monitorTryEnabled": config.get("monitorTryEnabled", True),
-            "monitorTries": config.get("monitorTries", 3),
+            "monitorTries": config.get("monitorTries", 2),
             "monitorInteraction": config.get("monitorInteraction", True),
             "monitorHeadless": config["monitorHeadless"],
             "monitorRulesPath": config.get("monitorRulesPath", ""),
@@ -1752,10 +1833,7 @@ class MyWindow(QMainWindow):
         self.ui.folderEdit.setReadOnly(False)
         self.ui.openFolderButton.setEnabled(True)
         self._close_log_file()
-        if self._last_worker_completed and not self._worker_stopped_by_user:
-            self.ui.clearButton.setVisible(True)
-        else:
-            self.ui.clearButton.setVisible(False)
+        self.ui.clearButton.setVisible(True)
         # 释放 worker 引用，方便下次启动新任务
         self.worker = None
         self._refresh_main_input_validation()
@@ -1796,7 +1874,7 @@ class MyWindow(QMainWindow):
         self.ui.monitorProgressBar.setValue(0)
         self.ui.downloadProgressBar.setValue(0)
         self.ui.generalProgressBar.setValue(0)
-        self.ui.clearButton.setVisible(False)
+        self.ui.clearButton.setVisible(True)
         self._refresh_main_input_validation()
 
     def on_clearLogButton_clicked(self):
