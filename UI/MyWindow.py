@@ -1441,6 +1441,10 @@ class MyWindow(QMainWindow):
 
         # 图标
         self.setWindowIcon(QIcon("src/downloader.ico"))
+        # stdout 回调可能在配置初始化期间触发，先准备日志字段
+        self._active_log_path = ""
+        self._log_file_handle = None
+        self._ui_line_buffer = ""
 
         # 重定向
         sys.stdout = EmittingStream()
@@ -1460,9 +1464,6 @@ class MyWindow(QMainWindow):
         self.worker = None
         self._last_worker_completed = False
         self._worker_stopped_by_user = False
-        self._active_log_path = ""
-        self._log_file_handle = None
-        self._ui_line_buffer = ""
         self._filename_placeholder_prefix = self.ui.filenameEdit.placeholderText()
         self._folder_placeholder_prefix = self.ui.folderEdit.placeholderText()
         self._filename_tooltip_prefix = self.ui.filenameEdit.toolTip()
@@ -1809,11 +1810,12 @@ class MyWindow(QMainWindow):
         self._last_worker_completed = bool(completed)
 
     def on_stdout_raw_written(self, text):
-        if self._log_file_handle is None:
+        log_file_handle = getattr(self, "_log_file_handle", None)
+        if log_file_handle is None:
             return
         try:
-            self._log_file_handle.write(text)
-            self._log_file_handle.flush()
+            log_file_handle.write(text)
+            log_file_handle.flush()
         except Exception:
             pass
 

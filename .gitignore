@@ -12,3 +12,4 @@ temporary/**
 config/preset/**
 config/*.broken*
 config/config.json
+_config/**
