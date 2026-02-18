@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import threading
 from datetime import datetime
 
 # ui
@@ -282,8 +283,10 @@ def ensure_normalized_config(config):
 class EmittingStream(QObject):
     textWritten = pyqtSignal(str)
     coverLine = pyqtSignal(str)
+    rawWritten = pyqtSignal(str)
 
     def write(self, text):
+        self.rawWritten.emit(str(text))
         if "\r" in text:
             text = text.rsplit("\r", 1)[-1]  # 分割文本，获取最后一个\r后的内容
             self.coverLine.emit(str(text))
@@ -296,6 +299,12 @@ class EmittingStream(QObject):
 
 
 class Worker(QThread):
+    monitorProgressChanged = pyqtSignal(int)
+    downloadProgressChanged = pyqtSignal(int)
+    generalProgressChanged = pyqtSignal(int)
+    logFileReady = pyqtSignal(str)
+    runCompleted = pyqtSignal(bool)
+
     def __init__(self, config, monitor=True):
         super().__init__()
         self.URL = config["URL"]
@@ -343,6 +352,7 @@ class Worker(QThread):
 
         self.monitor = monitor  # 是否进行监测（是否使用加载的列表）
         self._is_interrupted = False  # 退出标志
+        self._run_completed = False
         self.l = []  # 加载下载列表时使用
 
         if not self.monitor:
@@ -354,7 +364,40 @@ class Worker(QThread):
             elif self.listMode == 2:
                 self.monitor = True
 
+    @staticmethod
+    def _clamp_percent(value):
+        return max(0, min(100, int(value)))
+
+    def _emit_general_progress(self, task_index, task_total, task_progress):
+        if task_total <= 0:
+            self.generalProgressChanged.emit(0)
+            return
+        clamped = max(0.0, min(1.0, float(task_progress)))
+        percent = int(round(((task_index - 1) + clamped) * 100 / task_total))
+        self.generalProgressChanged.emit(self._clamp_percent(percent))
+
+    @staticmethod
+    def _task_output_paths():
+        data_dir = os.path.join(os.getcwd(), "Data")
+        os.makedirs(data_dir, exist_ok=True)
+        base_name = datetime.now().strftime("day-%y.%m.%d;time-%H.%M.%S")
+        suffix = 0
+        while True:
+            if suffix == 0:
+                final_name = base_name
+            else:
+                final_name = f"{base_name}-{suffix}"
+            json_path = os.path.join(data_dir, f"{final_name}.json")
+            log_path = os.path.join(data_dir, f"{final_name}.log")
+            if not os.path.exists(json_path) and not os.path.exists(log_path):
+                return json_path, log_path
+            suffix += 1
+
     def run(self):
+        self._run_completed = False
+        self.monitorProgressChanged.emit(0)
+        self.downloadProgressChanged.emit(0)
+        self.generalProgressChanged.emit(0)
         try:
             url_input, folder, filename = self.URL, self.folder, self.filename
             file_ext_text = self.fileExtText
@@ -376,6 +419,13 @@ class Worker(QThread):
                 parser = SimpleUrlParser()
                 url_template, replacements_data, placeholders = parser.parse_input_string(url_input)
                 urls_and_strings = parser.generate_urls_with_match_strings(url_template, replacements_data, placeholders)
+
+            total_tasks = len(urls_and_strings)
+            if total_tasks <= 0:
+                urls_and_strings = [("", "")]
+                total_tasks = 1
+
+            if url_input != "":
                 total_targets = len(urls_and_strings)
                 print(f"[task] parsed input: targets={total_targets}")
                 preview_count = min(5, total_targets)
@@ -388,13 +438,54 @@ class Worker(QThread):
             def run_url(url, this_filename, task_index, task_total):
                 current_urls = []
                 monitor_session_hints = {}
+                json_path, log_path = self._task_output_paths()
+                self.logFileReady.emit(log_path)
+
+                task_phase = {
+                    "monitor": 0.0,
+                    "download": 0.0,
+                    "total": 0.0,
+                }
+
+                def refresh_task_progress():
+                    combined = task_phase["monitor"] * 0.25 + task_phase["download"] * 0.75
+                    if combined < task_phase["total"]:
+                        combined = task_phase["total"]
+                    task_phase["total"] = combined
+                    self._emit_general_progress(task_index, task_total, combined)
+
+                def set_monitor_ratio(value):
+                    clamped = max(0.0, min(1.0, float(value)))
+                    if clamped < task_phase["monitor"]:
+                        clamped = task_phase["monitor"]
+                    task_phase["monitor"] = clamped
+                    refresh_task_progress()
+
+                def set_download_ratio(value):
+                    clamped = max(0.0, min(1.0, float(value)))
+                    if clamped < task_phase["download"]:
+                        clamped = task_phase["download"]
+                    task_phase["download"] = clamped
+                    refresh_task_progress()
+
                 if url == "" and self.monitor:
+                    self.monitorProgressChanged.emit(100)
+                    self.downloadProgressChanged.emit(0)
+                    set_monitor_ratio(1.0)
+                    set_download_ratio(1.0)
                     return
+
+                self.monitorProgressChanged.emit(0)
+                self.downloadProgressChanged.emit(0)
+                set_monitor_ratio(0.0)
+                set_download_ratio(0.0)
 
                 print("")
                 print(f"[task {task_index}/{task_total}] start")
                 print(f"[task] url={url}")
                 print(f"[task] output={os.path.join(folder, this_filename + file_ext_text)}")
+                print(f"[task] json={json_path}")
+                print(f"[task] log={log_path}")
                 print(
                     f"[task] mode={download_mode_text} recursion={recursion_enabled} "
                     f"depth={recursion_depth} save_list={download_list} parallel={max_parallel}"
@@ -418,11 +509,15 @@ class Worker(QThread):
                     print(f"[task] list mode={list_mode_text}")
                     sys.stdout.flush()  # 手动刷新缓冲区
                     current_urls = list(self.l)
+                    self.monitorProgressChanged.emit(100)
+                    set_monitor_ratio(1.0)
                 else:
                     if ".m3u8" in url:
                         # 给出m3u8的地址，直接开始下载
                         print("[task] m3u8 url provided; skip monitor")
                         current_urls = [url]
+                        self.monitorProgressChanged.emit(100)
+                        set_monitor_ratio(1.0)
                         monitor_session_hints = {
                             "source_url": url,
                             "final_url": url,
@@ -432,16 +527,56 @@ class Worker(QThread):
                         }
                     else:
                         # 监测网址获取下载地址
+                        monitor_percent = {"value": 0}
+
+                        def monitor_progress(payload):
+                            event = str(payload.get("event", "")).strip()
+                            tries = max(
+                                1,
+                                _to_int(payload.get("tries", monitor_config.get("tries", 1)), 1, 1, 9999),
+                            )
+                            attempt = _to_int(payload.get("attempt", 1), 1, 1, tries)
+                            done = _to_int(payload.get("done", 0), 0, 0, tries)
+                            if event == "start":
+                                percent = 1
+                            elif event == "attempt_start":
+                                ratio = ((attempt - 1) + 0.02) / tries
+                                percent = int(round(ratio * 100))
+                            elif event == "attempt_step":
+                                step = _to_int(payload.get("step", 0), 0, 0, 9999)
+                                steps = max(1, _to_int(payload.get("steps", 1), 1, 1, 9999))
+                                ratio = ((attempt - 1) + (step / steps)) / tries
+                                percent = int(round(ratio * 100))
+                            elif event == "candidate":
+                                percent = monitor_percent["value"] + 1
+                            elif event == "attempt_done":
+                                ratio = max(0.0, (done / tries) - 0.01)
+                                percent = int(round(ratio * 100))
+                            elif event == "done":
+                                percent = 100
+                            else:
+                                return
+                            percent = self._clamp_percent(percent)
+                            if percent < monitor_percent["value"]:
+                                percent = monitor_percent["value"]
+                            if percent != monitor_percent["value"]:
+                                monitor_percent["value"] = percent
+                                self.monitorProgressChanged.emit(percent)
+                                set_monitor_ratio(percent / 100.0)
+
                         monitor = MonitorM3U8(
                             url,
                             recursion_enabled=recursion_enabled,
                             recursion_depth=recursion_depth,
                             proxy_config=proxy_config,
                             monitor_config=monitor_config,
+                            progress_callback=monitor_progress,
                         )
                         l1, l2 = monitor.simple()
                         monitor_session_hints = monitor.get_session_hints()
                         current_urls = l1 + l2
+                        self.monitorProgressChanged.emit(100)
+                        set_monitor_ratio(1.0)
 
                 # 去重并保持顺序，避免重复下载
                 current_urls = list(dict.fromkeys(current_urls))
@@ -480,33 +615,104 @@ class Worker(QThread):
 
                 print(f"[task] detected m3u8 candidates={len(current_urls)}")
 
+                candidate_count = len(current_urls)
+                for index, i_url in enumerate(current_urls):
+                    d[str(index)] = {"url": i_url, "completed": False}
+                DownloadJson(d, filePath=json_path).write()
+
+                if candidate_count <= 0:
+                    print("[task] no candidates, mark current target as completed")
+                    set_download_ratio(1.0)
+                    return
+
                 success_target_map = {0: 0, 1: 1, 2: 5}
                 success_target = success_target_map.get(download_mode, None)
                 successful_videos = 0
                 target_reached = False
-                target_skip_logged = False
+                candidate_progress = [0.0] * candidate_count
+                progress_lock = threading.Lock()
+                download_ratio_state = {"value": 0.0}
+
+                if download_mode == 0:
+                    planned_successes = 0
+                elif success_target is None:
+                    planned_successes = candidate_count
+                else:
+                    planned_successes = max(1, min(success_target, candidate_count))
+
+                def push_download_ratio(value):
+                    clamped = max(0.0, min(1.0, float(value)))
+                    with progress_lock:
+                        if clamped < download_ratio_state["value"]:
+                            clamped = download_ratio_state["value"]
+                        if clamped == download_ratio_state["value"]:
+                            return
+                        download_ratio_state["value"] = clamped
+                    set_download_ratio(clamped)
+
+                def update_candidate_progress(index, ratio):
+                    if candidate_count <= 0:
+                        return
+                    with progress_lock:
+                        if index < 0 or index >= candidate_count:
+                            return
+                        clamped = max(0.0, min(1.0, float(ratio)))
+                        if clamped < candidate_progress[index]:
+                            clamped = candidate_progress[index]
+                        candidate_progress[index] = clamped
+                        aggregate = sum(candidate_progress) / candidate_count
+                    push_download_ratio(aggregate)
+
+                def update_quota_progress(current_ratio):
+                    if planned_successes <= 0:
+                        push_download_ratio(1.0)
+                        return
+                    clamped = max(0.0, min(1.0, float(current_ratio)))
+                    ratio = (successful_videos + clamped) / planned_successes
+                    push_download_ratio(ratio)
+
+                if download_mode == 0:
+                    push_download_ratio(1.0)
 
                 # 所有模式都先完成探测，然后进入下载阶段；
                 # 首个/前5个按“真实成功视频”数量计数，而不是按候选序号截断。
+                processed_index = -1
                 for i, i_url in enumerate(current_urls):
                     if self._is_interrupted:
                         print("Interrupted Success!")
+                        DownloadJson(d, filePath=json_path).write()
                         return
 
-                    if success_target is not None and successful_videos >= success_target:
+                    if success_target is not None and successful_videos >= planned_successes:
                         target_reached = True
-                        if not target_skip_logged and download_mode not in (0,):
-                            print(
-                                f"[task] success target reached ({successful_videos}/{success_target}), "
-                                f"skip remaining downloads"
-                            )
-                            target_skip_logged = True
-                        if download_list:
-                            d[str(i)] = {"url": i_url, "completed": False}
-                        continue
+                        break
 
                     completed = False
-                    if download_mode != 0:
+                    if download_mode == 0:
+                        update_candidate_progress(i, 1.0)
+                    else:
+                        self.downloadProgressChanged.emit(0)
+                        candidate_download_percent = {"value": 0}
+
+                        def on_download_progress(payload):
+                            event = str(payload.get("event", "")).strip()
+                            total = _to_int(payload.get("total", 0), 0, 0, 10**9)
+                            if total <= 0:
+                                percent = 0
+                            else:
+                                done = _to_int(payload.get("done", 0), 0, 0, total)
+                                percent = int(round(done * 100 / total))
+                            percent = self._clamp_percent(percent)
+                            if percent < candidate_download_percent["value"]:
+                                percent = candidate_download_percent["value"]
+                            if percent != candidate_download_percent["value"]:
+                                candidate_download_percent["value"] = percent
+                                self.downloadProgressChanged.emit(percent)
+                                if success_target is None:
+                                    update_candidate_progress(i, percent / 100.0)
+                                else:
+                                    update_quota_progress(percent / 100.0)
+
                         print(f"[download] candidate {i + 1}/{len(current_urls)}")
                         try:
                             x = DownloadM3U8(
@@ -515,6 +721,7 @@ class Worker(QThread):
                                 threadNum=max_parallel,
                                 proxy_config=proxy_config,
                                 session_hints=monitor_session_hints,
+                                progress_callback=on_download_progress,
                             )
                         except ValueError as e:
                             if "m3u8 read error" not in str(e):
@@ -537,26 +744,38 @@ class Worker(QThread):
                                     print(f"\n********{file_ext_text} completed generating********\n\n")
                                 else:
                                     print("\n********ffmpeg failed; continue next candidate********\n")
+                        else:
+                            if success_target is not None:
+                                update_quota_progress(0.0)
+
+                        if success_target is None:
+                            update_candidate_progress(i, 1.0)
+                        elif completed:
+                            push_download_ratio(successful_videos / planned_successes)
 
                     if download_list:
                         d[str(i)] = {"url": i_url, "completed": completed}
+                    DownloadJson(d, filePath=json_path).write()
+                    processed_index = i
+
+                if target_reached and processed_index + 1 < candidate_count:
+                    print(
+                        f"[task] success target reached ({successful_videos}/{planned_successes}), "
+                        f"skip remaining downloads={candidate_count - (processed_index + 1)}"
+                    )
+                    push_download_ratio(1.0)
 
                 if success_target is None:
                     print(f"[task] downloaded success videos={successful_videos} (mode=all)")
                 elif download_mode == 0:
                     print("[task] download mode=不下载, skip downloading candidates")
                 else:
-                    state = "reached" if target_reached or successful_videos >= success_target else "not reached"
+                    state = "reached" if target_reached or successful_videos >= planned_successes else "not reached"
                     print(
-                        f"[task] downloaded success videos={successful_videos}/{success_target} "
+                        f"[task] downloaded success videos={successful_videos}/{planned_successes} "
                         f"target {state}"
                     )
 
-                # 保存下载列表
-                if len(current_urls) != 0:
-                    DownloadJson(d).write()
-
-            total_tasks = len(urls_and_strings)
             for task_index, (url, match_str) in enumerate(urls_and_strings, start=1):
                 # 地址范围中的每个url 不是一个url中识别到的所有m3u8视频
                 run_url(
@@ -565,9 +784,16 @@ class Worker(QThread):
                     task_index,
                     total_tasks,
                 )
+                if self._is_interrupted:
+                    break
+
+            if not self._is_interrupted:
+                self._run_completed = True
 
         except Exception as e:
             print(f"Error in Worker! {e}")
+        finally:
+            self.runCompleted.emit(self._run_completed)
 
     def interrupt(self):
         """用于外部请求中断该线程"""
@@ -810,6 +1036,7 @@ class MyWindow(QMainWindow):
         sys.stdout = EmittingStream()
         sys.stdout.textWritten.connect(self.printInTextBrowser)
         sys.stdout.coverLine.connect(self.printInSameLine)
+        sys.stdout.rawWritten.connect(self.on_stdout_raw_written)
 
         # 避免第一次启动时读取到不完整配置
         ensure_normalized_config(ConfigJson())
@@ -819,6 +1046,11 @@ class MyWindow(QMainWindow):
         self.configWindow.close()  # 关闭窗口，避免内存泄露
         self.configWindow = None
         self.worker = None
+        self._last_worker_completed = False
+        self._worker_stopped_by_user = False
+        self._active_log_path = ""
+        self._log_file_handle = None
+        self._ui_line_buffer = ""
 
         # 自定义槽函数
         # disconnect 避免默认绑定导致槽函数多次执行
@@ -827,11 +1059,64 @@ class MyWindow(QMainWindow):
         self.ui.stopButton.clicked.disconnect()
         self.ui.configButton.clicked.disconnect()
         self.ui.clearButton.clicked.disconnect()
+        self.ui.clearLogButton.clicked.disconnect()
         self.ui.openFileButton.clicked.connect(self.on_openFileButton_clicked)
         self.ui.startButton.clicked.connect(self.on_startButton_clicked)
         self.ui.stopButton.clicked.connect(self.on_stopButton_clicked)
         self.ui.configButton.clicked.connect(self.on_configButton_clicked)
         self.ui.clearButton.clicked.connect(self.on_clearButton_clicked)
+        self.ui.clearLogButton.clicked.connect(self.on_clearLogButton_clicked)
+
+        self.ui.clearButton.setVisible(False)
+        self.ui.monitorProgressBar.setValue(0)
+        self.ui.downloadProgressBar.setValue(0)
+        self.ui.generalProgressBar.setValue(0)
+
+    def _close_log_file(self):
+        if self._log_file_handle is not None:
+            try:
+                self._log_file_handle.flush()
+                self._log_file_handle.close()
+            except Exception:
+                pass
+        self._log_file_handle = None
+        self._active_log_path = ""
+
+    def _set_active_log_file(self, log_path):
+        path = str(log_path or "").strip()
+        if path == "":
+            self._close_log_file()
+            return
+        if path == self._active_log_path and self._log_file_handle is not None:
+            return
+        self._close_log_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._log_file_handle = open(path, "a", encoding="utf-8")
+        self._active_log_path = path
+
+    def _attach_worker(self, worker):
+        self.worker = worker
+        self.worker.started.connect(self.on_worker_started)
+        self.worker.finished.connect(self.on_worker_finished)
+        self.worker.monitorProgressChanged.connect(self.ui.monitorProgressBar.setValue)
+        self.worker.downloadProgressChanged.connect(self.ui.downloadProgressBar.setValue)
+        self.worker.generalProgressChanged.connect(self.ui.generalProgressBar.setValue)
+        self.worker.logFileReady.connect(self.on_worker_log_file_ready)
+        self.worker.runCompleted.connect(self.on_worker_run_completed)
+        self.worker.start()  # 线程开始
+
+    @staticmethod
+    def _is_completed_line(line_text):
+        return line_text.strip().startswith("completed\t")
+
+    def _append_to_text_browser(self, text):
+        if text == "":
+            return
+        scroll_bar = self.ui.textBrowser.verticalScrollBar()
+        auto_scroll = scroll_bar.value() == scroll_bar.maximum()
+        self.ui.textBrowser.insertPlainText(text)
+        if auto_scroll:
+            scroll_bar.setValue(scroll_bar.maximum())
 
     def on_openFileButton_clicked(self):
         jsonDir = os.path.join(os.getcwd(), "Data")
@@ -890,10 +1175,7 @@ class MyWindow(QMainWindow):
                 "uncompleted": config.uncompleted,
             }
 
-            self.worker = Worker(passing_dict, False)
-            self.worker.started.connect(self.on_worker_started)
-            self.worker.finished.connect(self.on_worker_finished)
-            self.worker.start()  # 线程开始
+            self._attach_worker(Worker(passing_dict, False))
         except Exception as e:
             print(f"\nerror: passing_dict/worker: {e}")
 
@@ -932,17 +1214,20 @@ class MyWindow(QMainWindow):
             "monitorRulesPath": config.get("monitorRulesPath", ""),
         }
 
-        self.worker = Worker(passing_dict)
-        self.worker.started.connect(self.on_worker_started)
-        self.worker.finished.connect(self.on_worker_finished)
-        self.worker.start()  # 线程开始
+        self._attach_worker(Worker(passing_dict))
 
     def on_worker_started(self):
         # 控件状态
+        self._last_worker_completed = False
+        self._worker_stopped_by_user = False
+        self.ui.clearButton.setVisible(False)
         self.ui.startButton.setEnabled(False)  # 设置为不可用状态
         self.ui.openFileButton.setEnabled(False)
         self.ui.urlEdit.setReadOnly(True)  # 只读模式
         self.ui.filenameEdit.setReadOnly(True)  # 只读模式
+        self.ui.monitorProgressBar.setValue(0)
+        self.ui.downloadProgressBar.setValue(0)
+        self.ui.generalProgressBar.setValue(0)
 
     def on_worker_finished(self):
         # 控件状态
@@ -950,6 +1235,11 @@ class MyWindow(QMainWindow):
         self.ui.openFileButton.setEnabled(True)
         self.ui.urlEdit.setReadOnly(False)
         self.ui.filenameEdit.setReadOnly(False)
+        self._close_log_file()
+        if self._last_worker_completed and not self._worker_stopped_by_user:
+            self.ui.clearButton.setVisible(True)
+        else:
+            self.ui.clearButton.setVisible(False)
         # 释放 worker 引用，方便下次启动新任务
         self.worker = None
 
@@ -964,6 +1254,7 @@ class MyWindow(QMainWindow):
             os._exit(1)
 
         if self.worker is not None and self.worker.isRunning():
+            self._worker_stopped_by_user = True
             self.worker.interrupt()  # 请求线程安全中断
             print("\n...is interrupting")
         else:
@@ -975,22 +1266,58 @@ class MyWindow(QMainWindow):
         self.configWindow.show()
 
     def on_clearButton_clicked(self):
+        self.ui.urlEdit.clear()
+        self.ui.filenameEdit.clear()
         self.ui.textBrowser.clear()
+        self._ui_line_buffer = ""
+        self.ui.monitorProgressBar.setValue(0)
+        self.ui.downloadProgressBar.setValue(0)
+        self.ui.generalProgressBar.setValue(0)
+        self.ui.clearButton.setVisible(False)
+
+    def on_clearLogButton_clicked(self):
+        self.ui.textBrowser.clear()
+        self._ui_line_buffer = ""
+
+    def on_worker_log_file_ready(self, path):
+        self._set_active_log_file(path)
+
+    def on_worker_run_completed(self, completed):
+        self._last_worker_completed = bool(completed)
+
+    def on_stdout_raw_written(self, text):
+        if self._log_file_handle is None:
+            return
+        try:
+            self._log_file_handle.write(text)
+            self._log_file_handle.flush()
+        except Exception:
+            pass
 
     def printInTextBrowser(self, text):
-        # 获取文本浏览器的垂直滚动条
-        scroll_bar = self.ui.textBrowser.verticalScrollBar()
-        # 判断当前是否处于底部
-        auto_scroll = scroll_bar.value() == scroll_bar.maximum()
+        if text == "":
+            return
+        if not self.ui.cleanLogCheckBox.isChecked():
+            self._append_to_text_browser(text)
+            return
 
-        # 插入文本
-        self.ui.textBrowser.insertPlainText(text)
+        self._ui_line_buffer += text
+        lines = self._ui_line_buffer.splitlines(keepends=True)
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            self._ui_line_buffer = lines.pop()
+        else:
+            self._ui_line_buffer = ""
 
-        # 如果之前在底部，则自动滚动到最新的内容
-        if auto_scroll:
-            scroll_bar.setValue(scroll_bar.maximum())
+        filtered = []
+        for line in lines:
+            if not self._is_completed_line(line):
+                filtered.append(line)
+        if filtered:
+            self._append_to_text_browser("".join(filtered))
 
     def printInSameLine(self, text):
+        if self.ui.cleanLogCheckBox.isChecked() and self._is_completed_line(text):
+            return
         cursor = self.ui.textBrowser.textCursor()
         cursor.movePosition(QTextCursor.End)  # 移动光标到末尾
         cursor.movePosition(QTextCursor.StartOfLine, QTextCursor.KeepAnchor)  # 移动到当前行首

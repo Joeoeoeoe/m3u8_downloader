@@ -14,7 +14,15 @@ from RandomHeaders import RandomHeaders
 
 
 class DownloadM3U8:
-    def __init__(self, folder, URL, threadNum=100, proxy_config=None, session_hints=None):
+    def __init__(
+        self,
+        folder,
+        URL,
+        threadNum=100,
+        proxy_config=None,
+        session_hints=None,
+        progress_callback=None,
+    ):
         # 文件夹
         self.fileDir = folder
         self.tempDir = os.path.join(self.fileDir, ".TEMP")
@@ -58,6 +66,8 @@ class DownloadM3U8:
         self.session_hints = self._normalize_session_hints(session_hints)
         self.identity_pool = self._build_identity_pool(pool_size=3)
         self.active_identity_index = 0
+        self.progress_callback = progress_callback if callable(progress_callback) else None
+        self.completedNameSet = set()
         print(f"identity pool size={len(self.identity_pool)}")
 
         self.prepareDownload()  # 对index.m3u8初步解析，填充上面两个列表，不做任何下载
@@ -298,14 +308,27 @@ class DownloadM3U8:
 
     def printInfo(self, stage, filename, url=None, time_cost=None):
         # stage: 阶段 getting got downloading downloaded completed
+        line = ""
         if stage == "completed":
             if time_cost is None:
-                print(f"{stage}\t{self.connections}\t****{filename}****", end="")
+                line = f"{stage}\t{self.connections}\t****{filename}****"
             else:
-                print(f"{stage}\t{self.connections}\ttime={time_cost}\t****{filename}****", end="")
+                line = f"{stage}\t{self.connections}\ttime={time_cost}\t****{filename}****"
         else:
-            print(f"{stage}\t\t****{filename}****", end="")
-        print(f"\t:{url}") if url else print()
+            line = f"{stage}\t\t****{filename}****"
+        if url:
+            line = f"{line}\t:{url}"
+        print(line)
+
+    def _emit_progress(self, event, **kwargs):
+        if self.progress_callback is None:
+            return
+        payload = {"event": event}
+        payload.update(kwargs)
+        try:
+            self.progress_callback(payload)
+        except Exception:
+            pass
 
     def printM3U8(self):
         if self.playlist:
@@ -375,7 +398,11 @@ class DownloadM3U8:
                 # 打印
                 with self.state_lock:
                     self.connections = self.connections + 1
+                    self.completedNameSet.add(fileName)
+                    completed_count = len(self.completedNameSet)
+                    total_count = len(self.fileNameList)
                 self.printInfo("completed", fileName, fileUrl, response.elapsed.total_seconds())
+                self._emit_progress("segment_done", done=completed_count, total=total_count, file=fileName)
 
         except requests.RequestException as e:
             status_code = getattr(getattr(e, "response", None), "status_code", None)
@@ -446,6 +473,9 @@ class DownloadM3U8:
         self.timeoutTimer.StartTimer()
         self.round_threads = self.threadNum
         self._set_active_identity(0)
+        self.completedNameSet.clear()
+        total_segments = len(self.fileNameList)
+        self._emit_progress("start", done=0, total=total_segments)
 
         # 下载和写List中的文件
         print(f"\n\t********total={len(self.fileNameList)}********")
@@ -458,6 +488,12 @@ class DownloadM3U8:
 
         # 结束定时器
         self.timeoutTimer.StopTimer()
+        self._emit_progress(
+            "done",
+            done=len(self.completedNameSet),
+            total=total_segments,
+            failed=len(self.failedNameList),
+        )
 
         # 写index.m3u8 - 删除无效文件
         self.WriteM3U8()

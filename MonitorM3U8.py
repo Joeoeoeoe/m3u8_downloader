@@ -6,7 +6,7 @@ import random
 import re
 import threading
 import time
-from urllib.parse import parse_qs, unquote, urldefrag, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, urldefrag, urljoin, urlparse, urlunparse
 
 import requests
 from playwright.sync_api import sync_playwright
@@ -152,6 +152,7 @@ class MonitorM3U8:
         recursion_depth=1,
         proxy_config=None,
         monitor_config=None,
+        progress_callback=None,
     ):
         self.URL = URL
         self.possible = set()
@@ -171,6 +172,7 @@ class MonitorM3U8:
         self.monitor_tries = self.monitor_config["tries"]
         self.monitor_headers = self._build_monitor_headers()
         self.verbose_log = self._to_bool(os.getenv("M3U8_MONITOR_VERBOSE", ""), False)
+        self.progress_callback = progress_callback if callable(progress_callback) else None
         self.last_monitor_error = ""
         self.last_blocked_by_client = False
         self.session_hints = {
@@ -269,6 +271,16 @@ class MonitorM3U8:
 
     def _log_monitor(self, message):
         print(f"\t[monitor] {message}")
+
+    def _emit_progress(self, event, **kwargs):
+        if self.progress_callback is None:
+            return
+        payload = {"event": event}
+        payload.update(kwargs)
+        try:
+            self.progress_callback(payload)
+        except Exception:
+            pass
 
     def _log_verbose(self, message):
         if self.verbose_log:
@@ -1333,11 +1345,58 @@ class MonitorM3U8:
         return key_a != "" and key_a == key_b
 
     @staticmethod
+    def _replace_percent_u(raw_text):
+        if not isinstance(raw_text, str) or raw_text == "":
+            return ""
+
+        def _to_unicode(match):
+            try:
+                return chr(int(match.group(1), 16))
+            except Exception:
+                return match.group(0)
+
+        return re.sub(r"%u([0-9a-fA-F]{4})", _to_unicode, raw_text)
+
+    @staticmethod
+    def _contains_escape_sequence(raw_text):
+        if not isinstance(raw_text, str):
+            return False
+        return bool(re.search(r"(\\u[0-9a-fA-F]{4}|\\x[0-9a-fA-F]{2}|%u[0-9a-fA-F]{4})", raw_text))
+
+    @staticmethod
+    def _mojibake_score(text):
+        bad_markers = {"Ã", "Â", "Ð", "Ñ", "¤", "¦", "¢", "£", "�"}
+        cjk_count = sum(1 for char in text if 0x4E00 <= ord(char) <= 0x9FFF)
+        bad_count = sum(1 for char in text if char in bad_markers)
+        return cjk_count * 3 - bad_count * 2
+
+    @staticmethod
+    def _repair_mojibake_text(raw_text, max_rounds=3):
+        if not isinstance(raw_text, str) or raw_text == "":
+            return raw_text
+        current = raw_text
+        for _ in range(max_rounds):
+            try:
+                fixed = current.encode("latin1").decode("utf-8")
+            except Exception:
+                break
+            if fixed == current:
+                break
+            if MonitorM3U8._mojibake_score(fixed) < MonitorM3U8._mojibake_score(current):
+                break
+            current = fixed
+        return current
+
+    @staticmethod
     def decode(url):
         try:
             raw = str(url).rstrip("\\")
             raw = raw.replace("\\\\", "\\")
-            decoded = raw.encode("utf-8").decode("unicode_escape")
+            transformed = MonitorM3U8._replace_percent_u(raw)
+            if not MonitorM3U8._contains_escape_sequence(raw) and transformed == raw:
+                return ""
+            decoded = transformed.encode("utf-8").decode("unicode_escape")
+            decoded = MonitorM3U8._repair_mojibake_text(decoded)
             return decoded if decoded != raw else ""
         except Exception:
             return ""
@@ -1351,6 +1410,8 @@ class MonitorM3U8:
             return ""
 
         normalized = normalized.replace("\\/", "/")
+        normalized = self._replace_percent_u(normalized)
+        normalized = self._repair_mojibake_text(normalized)
         decoded = self.decode(normalized)
         if decoded != "":
             normalized = decoded
@@ -1367,6 +1428,24 @@ class MonitorM3U8:
         if parsed.scheme not in ["http", "https"]:
             return ""
 
+        clean_path = self._replace_percent_u(parsed.path)
+        clean_path = self._repair_mojibake_text(clean_path)
+        clean_path = quote(clean_path, safe="/%:@&=+$,;~-._!*'()")
+
+        clean_query = self._replace_percent_u(parsed.query)
+        clean_query = self._repair_mojibake_text(clean_query)
+        clean_query = quote(clean_query, safe="=&%/:?+,-._~!*'()")
+
+        normalized = urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                clean_path,
+                parsed.params,
+                clean_query,
+                "",
+            )
+        )
         return normalized
 
     @staticmethod
@@ -1424,7 +1503,10 @@ class MonitorM3U8:
         if candidate == "" or not self._is_m3u8_url(candidate):
             return
 
+        candidate_added = False
+        predicted_added = False
         with self.lock:
+            candidate_added = candidate not in self.possible
             self.possible.add(candidate)
             if referer:
                 self.url_hints[candidate] = referer
@@ -1432,15 +1514,27 @@ class MonitorM3U8:
 
             guessed_index = self._predict_variant(candidate, "index.m3u8")
             if guessed_index:
+                predicted_added = predicted_added or (guessed_index not in self.predicted)
                 self.predicted.add(guessed_index)
                 if referer:
                     self.session_hints["referer_map"][guessed_index] = referer
 
             guessed_mixed = self._predict_variant(candidate, "mixed.m3u8")
             if guessed_mixed:
+                predicted_added = predicted_added or (guessed_mixed not in self.predicted)
                 self.predicted.add(guessed_mixed)
                 if referer:
                     self.session_hints["referer_map"][guessed_mixed] = referer
+
+            possible_count = len(self.possible)
+            predicted_count = len(self.predicted)
+
+        if candidate_added or predicted_added:
+            self._emit_progress(
+                "candidate",
+                possible=possible_count,
+                predicted=predicted_count,
+            )
 
         # 兼容解析页格式：?url=https://real.cdn/xx/index.m3u8
         self._extract_nested_m3u8_from_wrapper(candidate, referer=referer)
@@ -2592,8 +2686,10 @@ class MonitorM3U8:
             browser = None
             context = None
             try:
+                self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=1, steps=8, phase="launch")
                 browser = __launch_browser(playwright_driver, launch_kwargs)
                 self._log_verbose("launch browser actual=chromium")
+                self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=2, steps=8, phase="browser")
                 context = browser.new_context(
                     user_agent=self.monitor_headers.get("user-agent", self._default_user_agent()),
                     locale="zh-CN",
@@ -2611,6 +2707,7 @@ class MonitorM3U8:
                 if extra_headers:
                     context.set_extra_http_headers(extra_headers)
 
+                self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=3, steps=8, phase="context")
                 page = context.new_page()
                 page.set_default_timeout(12000)
                 page.on("response", self.handle_response)
@@ -2636,12 +2733,14 @@ class MonitorM3U8:
 
                 context.on("page", _on_popup)
 
+                self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=4, steps=8, phase="goto")
                 page.goto(self.URL, wait_until="domcontentloaded", timeout=18000)
                 try:
                     page.wait_for_load_state("networkidle", timeout=8000)
                 except Exception:
                     pass
 
+                self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=5, steps=8, phase="extract")
                 self._extract_candidates_from_page(page)
                 if self.interaction_enabled:
                     self._try_trigger_player(
@@ -2650,6 +2749,7 @@ class MonitorM3U8:
                         attempt=attempt,
                         tries=tries,
                     )
+                self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=6, steps=8, phase="interaction")
 
                 if self.recursion_depth > 1:
                     self._collect_recursive_candidates(page)
@@ -2660,7 +2760,9 @@ class MonitorM3U8:
                     self._recover_page_if_needed(page, self.URL)
                     self._extract_candidates_from_page(page)
 
+                self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=7, steps=8, phase="hints")
                 self._update_session_hints(context, page)
+                self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=8, steps=8, phase="done")
             finally:
                 if context is not None:
                     try:
@@ -2714,7 +2816,12 @@ class MonitorM3U8:
             self._log_monitor("proxy=off")
 
         tries = self.monitor_tries
+        self._emit_progress("start", tries=tries, done=0)
         with sync_playwright() as p:
+            try:
+                self._log_monitor(f"chromium executable={p.chromium.executable_path}")
+            except Exception:
+                self._log_monitor("chromium executable=(unknown)")
             for attempt in range(tries):
                 attempt_no = attempt + 1
                 attempt_started_at = time.perf_counter()
@@ -2730,6 +2837,7 @@ class MonitorM3U8:
                     f"attempt {attempt_no}/{tries} start "
                     f"strategy={stage_name} channel=chromium"
                 )
+                self._emit_progress("attempt_start", attempt=attempt_no, tries=tries, done=attempt_no - 1)
                 try:
                     __monitor_single(
                         p,
@@ -2743,6 +2851,13 @@ class MonitorM3U8:
                     self._log_monitor(
                         f"attempt {attempt_no}/{tries} failed in {self._fmt_seconds(elapsed)}: {exc}"
                     )
+                    self._emit_progress(
+                        "attempt_done",
+                        attempt=attempt_no,
+                        tries=tries,
+                        done=attempt_no,
+                        success=False,
+                    )
                     continue
 
                 after = len(self.possible)
@@ -2754,6 +2869,13 @@ class MonitorM3U8:
                 )
                 if self.last_blocked_by_client:
                     self._log_monitor("blocked-by-client detected; continue with retry strategy")
+                self._emit_progress(
+                    "attempt_done",
+                    attempt=attempt_no,
+                    tries=tries,
+                    done=attempt_no,
+                    success=True,
+                )
 
         if len(self.possible) == 0 and self.last_monitor_error != "":
             self._log_monitor(f"ended with last error: {self.last_monitor_error}")
@@ -2766,6 +2888,14 @@ class MonitorM3U8:
             f"done in {self._fmt_seconds(monitor_elapsed)} "
             f"possible={len(self.possible)} predicted={len(self.predicted)} "
             f"fallback_new={fallback_added}"
+        )
+        self._emit_progress(
+            "done",
+            tries=tries,
+            done=tries,
+            possible=len(self.possible),
+            predicted=len(self.predicted),
+            fallback_new=fallback_added,
         )
         return list(self._ordered_m3u8_lists())
 
@@ -2854,15 +2984,13 @@ class MonitorM3U8:
         )
         return possible, predicted
 
-    def _print_candidate_preview(self, label, urls, limit=3):
+    def _print_candidate_preview(self, label, urls):
         values = list(urls or [])
         if len(values) == 0:
             return
-        count = min(len(values), max(1, int(limit)))
-        for item in values[:count]:
-            print(f"\t{label} m3u8 = {item}")
-        if len(values) > count:
-            print(f"\t{label} m3u8 = ... (+{len(values) - count} more)")
+        print(f"\t{label} m3u8 total={len(values)}")
+        for index, item in enumerate(values, start=1):
+            print(f"\t{label} [{index}] {item}")
 
     def get_session_hints(self):
         return {
@@ -2893,7 +3021,7 @@ class MonitorM3U8:
                 f"possible={len(possible)} predicted={len(predicted)}"
             )
             if self.verbose_log:
-                self._print_candidate_preview("possible", possible, limit=5)
-                self._print_candidate_preview("predicted", predicted, limit=5)
+                self._print_candidate_preview("possible", possible)
+                self._print_candidate_preview("predicted", predicted)
 
         return [possible, predicted]

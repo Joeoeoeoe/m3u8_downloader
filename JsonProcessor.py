@@ -93,10 +93,11 @@ class ConfigJson(JsonProcessor):
 
 # 初始化需要传入一个字典变量
 class DownloadJson(JsonProcessor):
-    def __init__(self,data):
-        fileDir = os.path.join(os.getcwd(), 'Data')
-        formatted_time = datetime.now().strftime("day-%y.%m.%d;time-%H.%M.%S")
-        filePath = os.path.join(fileDir, f"{formatted_time}.json")
+    def __init__(self,data, filePath=None):
+        if filePath is None:
+            fileDir = os.path.join(os.getcwd(), 'Data')
+            formatted_time = datetime.now().strftime("day-%y.%m.%d;time-%H.%M.%S")
+            filePath = os.path.join(fileDir, f"{formatted_time}.json")
         super().__init__(filePath, data)
 
 class ReadDownloadJson(JsonProcessor):
