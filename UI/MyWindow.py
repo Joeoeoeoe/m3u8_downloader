@@ -744,9 +744,31 @@ class Worker(QThread):
                     "download": 0.0,
                     "total": 0.0,
                 }
+                progress_weights = {
+                    "monitor": 0.25,
+                    "download": 0.75,
+                }
+
+                def set_progress_weights(monitor_weight, download_weight):
+                    monitor_value = max(0.0, float(monitor_weight))
+                    download_value = max(0.0, float(download_weight))
+                    total_weight = monitor_value + download_value
+                    if total_weight <= 0:
+                        progress_weights["monitor"] = 0.0
+                        progress_weights["download"] = 1.0
+                        return
+                    progress_weights["monitor"] = monitor_value / total_weight
+                    progress_weights["download"] = download_value / total_weight
+
+                def use_download_only_progress():
+                    # Monitoring was skipped for this task, so total progress should follow download progress only.
+                    set_progress_weights(0.0, 1.0)
 
                 def refresh_task_progress():
-                    combined = task_phase["monitor"] * 0.25 + task_phase["download"] * 0.75
+                    combined = (
+                        task_phase["monitor"] * progress_weights["monitor"]
+                        + task_phase["download"] * progress_weights["download"]
+                    )
                     if combined < task_phase["total"]:
                         combined = task_phase["total"]
                     task_phase["total"] = combined
@@ -809,6 +831,7 @@ class Worker(QThread):
                 if not self.monitor:
                     print(f"[task] list mode={list_mode_text}")
                     sys.stdout.flush()  # 手动刷新缓冲区
+                    use_download_only_progress()
                     current_urls = list(self.l)
                     self.monitorProgressChanged.emit(100)
                     set_monitor_ratio(1.0)
@@ -816,6 +839,7 @@ class Worker(QThread):
                     if ".m3u8" in url:
                         # 给出m3u8的地址，直接开始下载
                         print("[task] m3u8 url provided; skip monitor")
+                        use_download_only_progress()
                         current_urls = [url]
                         self.monitorProgressChanged.emit(100)
                         set_monitor_ratio(1.0)
