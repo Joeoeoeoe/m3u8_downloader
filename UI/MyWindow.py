@@ -1408,6 +1408,10 @@ class MyWindow(QMainWindow):
         self._active_log_path = ""
         self._log_file_handle = None
         self._ui_line_buffer = ""
+        self._filename_placeholder_prefix = self.ui.filenameEdit.placeholderText()
+        self._folder_placeholder_prefix = self.ui.folderEdit.placeholderText()
+        self._filename_tooltip_prefix = self.ui.filenameEdit.toolTip()
+        self._folder_tooltip_prefix = self.ui.folderEdit.toolTip()
 
         # 自定义槽函数
         # disconnect 避免默认绑定导致槽函数多次执行
@@ -1417,6 +1421,9 @@ class MyWindow(QMainWindow):
         self.ui.configButton.clicked.disconnect()
         self.ui.clearButton.clicked.disconnect()
         self.ui.clearLogButton.clicked.disconnect()
+        self.ui.openFolderButton.clicked.disconnect()
+        self.ui.folderEdit.textChanged.disconnect()
+        self.ui.filenameEdit.textChanged.disconnect()
         self.ui.openFileButton.clicked.connect(self.on_openFileButton_clicked)
         self.ui.startButton.clicked.connect(self.on_startButton_clicked)
         self.ui.stopButton.clicked.connect(self.on_stopButton_clicked)
@@ -1467,6 +1474,18 @@ class MyWindow(QMainWindow):
         self.worker.runCompleted.connect(self.on_worker_run_completed)
         self.worker.start()  # 线程开始
 
+    @staticmethod
+    def _append_hint(prefix, value):
+        base = _to_text(prefix, "")
+        suffix = _to_text(value, "")
+        if suffix == "":
+            return base
+        if base == "":
+            return suffix
+        if base.endswith(("：", ":", " ", "\t", "\n")):
+            return f"{base}{suffix}"
+        return f"{base} {suffix}"
+
     def _refresh_default_input_hints(self, config=None):
         effective = config if isinstance(config, dict) else ensure_normalized_config(ConfigJson())
         defaults = default_config()
@@ -1481,21 +1500,27 @@ class MyWindow(QMainWindow):
             effective.get("filename", defaults["filename"]),
             defaults["filename"],
         )
-        self.ui.filenameEdit.setToolTip(f"默认文件名：{self._default_filename}")
-        self.ui.filenameEdit.setPlaceholderText(f"输入文件名，留空：{self._default_filename}")
-        self.ui.folderEdit.setToolTip(f"默认目录：{self._default_folder}")
-        self.ui.folderEdit.setPlaceholderText(f"输入/选择存储地址，留空：{self._default_folder}")
+        self.ui.filenameEdit.setPlaceholderText(
+            self._append_hint(self._filename_placeholder_prefix, self._default_filename)
+        )
+        self.ui.folderEdit.setPlaceholderText(
+            self._append_hint(self._folder_placeholder_prefix, self._default_folder)
+        )
+        self.ui.filenameEdit.setToolTip(
+            self._append_hint(self._filename_tooltip_prefix, self._default_filename)
+        )
+        self.ui.folderEdit.setToolTip(self._append_hint(self._folder_tooltip_prefix, self._default_folder))
 
     def _refresh_main_input_validation(self):
         result = _resolve_directory_input(self.ui.folderEdit.text(), self._default_folder, create=False)
         if result["ok"]:
             self.ui.folderEdit.setStyleSheet("")
-            if self.ui.folderEdit.text().strip() != "":
-                self.ui.folderEdit.setToolTip(result["path"])
+            display_path = result["path"] if self.ui.folderEdit.text().strip() != "" else self._default_folder
+            self.ui.folderEdit.setToolTip(self._append_hint(self._folder_tooltip_prefix, display_path))
         else:
             self.ui.folderEdit.setStyleSheet("border: 1px solid #d9534f;")
             reason = result.get("reason", "directory is invalid")
-            self.ui.folderEdit.setToolTip(f"无效目录: {reason}")
+            self.ui.folderEdit.setToolTip(self._append_hint(self._folder_tooltip_prefix, f"无效目录: {reason}"))
 
         can_start = result["ok"] and not (self.worker is not None and self.worker.isRunning())
         self.ui.startButton.setEnabled(can_start)
