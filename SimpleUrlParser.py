@@ -72,16 +72,8 @@ class SimpleUrlParser:
             # 如果没有需要替换的占位符，或没有提供替换规则，则直接返回原始 URL 模板
             return [url_template]
 
-        # 确保按照占位符在模板中出现的顺序来取值列表
-        ordered_value_lists = []
-        for ph in placeholders_in_template:
-            if ph in replacements_data:
-                ordered_value_lists.append(replacements_data[ph])
-            else:
-                # 如果模板中有占位符但没有对应的规则，则忽略这个占位符的生成
-                # 这应该在 parse_input_string 中被警告
-                print(f"Error: Placeholder '{{{{{ph}}}}}' in template missing replacement data.")
-                return [] # 无法生成，返回空列表
+        # 按模板中的占位符顺序取值；若某占位符缺失规则，则保留原文占位符。
+        ordered_value_lists, _ = self._build_ordered_value_lists(placeholders_in_template, replacements_data)
 
         # 生成所有组合
         for combo in product(*ordered_value_lists):
@@ -105,6 +97,27 @@ class SimpleUrlParser:
 
         return generated_urls
 
+    @staticmethod
+    def _placeholder_literal(placeholder_key):
+        return f"{{{{{placeholder_key}}}}}"
+
+    def _build_ordered_value_lists(self, placeholders_in_template, replacements_data):
+        ordered_value_lists = []
+        placeholders_with_rules = {}
+        for ph in placeholders_in_template:
+            values = replacements_data.get(ph)
+            if isinstance(values, list) and len(values) > 0:
+                ordered_value_lists.append(values)
+                placeholders_with_rules[ph] = True
+                continue
+
+            print(
+                f"Warning: Placeholder '{{{{{ph}}}}}' in template missing replacement data. "
+                "Keep raw placeholder text."
+            )
+            ordered_value_lists.append([self._placeholder_literal(ph)])
+            placeholders_with_rules[ph] = False
+        return ordered_value_lists, placeholders_with_rules
 
     def generate_urls_with_match_strings(self, url_template, replacements_data, placeholders_in_template):
         """
@@ -117,16 +130,10 @@ class SimpleUrlParser:
             # 如果没有需要替换的占位符，或没有提供替换规则
             # match_string 为空
             return [(url_template, "")]
-        # 确保按照占位符在模板中出现的顺序来取值列表
-        ordered_value_lists = []
-        for ph in placeholders_in_template:
-            if ph in replacements_data:
-                ordered_value_lists.append(replacements_data[ph])
-            else:
-                # 如果模板中有占位符但没有对应的规则，则忽略这个占位符的生成
-                # 这应该在 parse_input_string 中被警告
-                print(f"Error: Placeholder '{{{{{ph}}}}}' in template missing replacement data.")
-                return [] # 无法生成，返回空列表
+        ordered_value_lists, placeholders_with_rules = self._build_ordered_value_lists(
+            placeholders_in_template,
+            replacements_data,
+        )
         # 生成所有组合
         for combo in product(*ordered_value_lists):
             current_url = url_template
@@ -146,7 +153,8 @@ class SimpleUrlParser:
                 current_url = current_url.replace(f"{{{{{placeholder_key}}}}}", ph_str_val, 1) # 只替换一次，防止多重替换错误
 
                 # 为匹配字符串添加部件
-                match_parts.append(f"{placeholder_key}_{ph_str_val}")
+                if placeholders_with_rules.get(placeholder_key, False):
+                    match_parts.append(f"{placeholder_key}_{ph_str_val}")
 
             # 构建最终的匹配字符串
             match_string = "_".join(match_parts)

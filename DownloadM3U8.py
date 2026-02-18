@@ -306,9 +306,10 @@ class DownloadM3U8:
 
         # 如果目标文件夹存在且非空
         if os.path.exists(folder_path):
-            os.mkdir(residual_path)
-            if os.listdir(folder_path):
-                for item in os.listdir(folder_path):
+            existing_items = [item for item in os.listdir(folder_path) if item != ".residual"]
+            if existing_items:
+                os.mkdir(residual_path)
+                for item in existing_items:
                     item_path = os.path.join(folder_path, item)
                     shutil.move(item_path, residual_path)
         else:
@@ -766,7 +767,8 @@ class DownloadM3U8:
 
     def process_video_with_ffmpeg(self, base_filename: str, extension: str = ".mp4") -> bool:
         self._ffmpeg_exe_path = os.path.join(os.getcwd(), "ffmpeg.exe")
-        if self._ffmpeg_exe_path is None:
+        if not os.path.isfile(self._ffmpeg_exe_path):
+            print(f"[error][ffmpeg] executable not found: '{self._ffmpeg_exe_path}'")
             return False
         index_m3u8_path = os.path.join(self.tempDir, "index.m3u8")
 

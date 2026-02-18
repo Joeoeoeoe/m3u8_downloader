@@ -1119,6 +1119,13 @@ class MonitorM3U8:
                 raise ValueError(f"{path}.match.url_contains must be string/array")
             if "url_regex" in match and not isinstance(match.get("url_regex"), str):
                 raise ValueError(f"{path}.match.url_regex must be string")
+            if "url_regex" in match:
+                pattern = str(match.get("url_regex", "")).strip()
+                if pattern != "":
+                    try:
+                        re.compile(pattern, flags=re.IGNORECASE)
+                    except re.error as exc:
+                        raise ValueError(f"{path}.match.url_regex invalid regex: {exc}") from exc
 
             self._validate_action_list(site.get("actions", []), f"{path}.actions")
             self._validate_chain_map(site.get("chains", {}), f"{path}.chains")
