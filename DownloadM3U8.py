@@ -32,13 +32,13 @@ class DownloadM3U8:
         self.URL = URL.strip()
         parsed = urlparse(self.URL)
         self.origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
-        print("parsed:", parsed, "; ", "self.origin:", self.origin)
+        print(f"[download][init] parsed_url={parsed.geturl()} origin={self.origin or '(none)'}")
 
         self.proxy_config = self._normalize_proxy_config(proxy_config)
         self.proxy_url = self._build_proxy_url(self.proxy_config)
         if self.proxy_config["enabled"]:
             print(
-                f"using proxy: {self.proxy_config['address']}:{self.proxy_config['port']} "
+                f"[download][proxy] using {self.proxy_config['address']}:{self.proxy_config['port']} "
                 f"user={self.proxy_config['username'] or '(none)'}"
             )
 
@@ -78,7 +78,7 @@ class DownloadM3U8:
         self.active_identity_index = 0
         self.progress_callback = progress_callback if callable(progress_callback) else None
         self.completedNameSet = set()
-        print(f"identity pool size={len(self.identity_pool)}")
+        print(f"[download][init] identity_pool_size={len(self.identity_pool)}")
 
         self.prepareDownload()  # 对index.m3u8初步解析，填充上面两个列表，不做任何下载
 
@@ -292,8 +292,8 @@ class DownloadM3U8:
         """
         folder_path = os.path.abspath(folder_path)
         residual_path = os.path.join(folder_path, ".residual")
-        print(folder_path)
-        print(residual_path)
+        print(f"[file] temp_folder={folder_path}")
+        print(f"[file] residual_folder={residual_path}")
 
         # 如果 .residual 文件夹存在，则清空
         if os.path.exists(residual_path):
@@ -318,17 +318,29 @@ class DownloadM3U8:
 
     def printInfo(self, stage, filename, url=None, time_cost=None):
         # stage: 阶段 getting got downloading downloaded completed
-        line = ""
-        if stage == "completed":
-            if time_cost is None:
-                line = f"{stage}\t{self.connections}\t****{filename}****"
-            else:
-                line = f"{stage}\t{self.connections}\ttime={time_cost}\t****{filename}****"
+        stage_text = str(stage or "").strip()
+        stage_lower = stage_text.lower()
+        if stage_lower == "completed":
+            level = "completed"
+        elif stage_lower.startswith("failed"):
+            level = "error"
+        elif stage_lower in {"getting", "got", "downloading", "downloaded"}:
+            level = stage_lower
         else:
-            line = f"{stage}\t\t****{filename}****"
+            level = stage_lower if stage_lower != "" else "info"
+
+        fields = [f"[segment][{level}]"]
+        if filename:
+            fields.append(f"file={filename}")
+        if stage_lower == "completed":
+            fields.append(f"conn={self.connections}")
+            if time_cost is not None:
+                fields.append(f"time={time_cost}")
+        elif stage_lower.startswith("failed"):
+            fields.append(f"reason={stage_text}")
         if url:
-            line = f"{line}\t:{url}"
-        print(line)
+            fields.append(f"url={url}")
+        print(" ".join(fields))
 
     def _emit_progress(self, event, **kwargs):
         if self.progress_callback is None:
@@ -355,7 +367,7 @@ class DownloadM3U8:
             if target_timeout == old_timeout:
                 return False
             self.timeout = target_timeout
-        print(f"\t********timeout adjust ({reason}): {old_timeout} -> {target_timeout}********")
+        print(f"[retry] timeout_adjust reason={reason} {old_timeout}->{target_timeout}")
         return True
 
     def _compute_retry_budget(self, retries, first_pass_failed_count):
@@ -430,7 +442,7 @@ class DownloadM3U8:
                 if len(playlist.segments) == 0:
                     raise ValueError("empty m3u8 playlist")
         except Exception as e:
-            print(f"m3u8 read error! {e}\n\n")
+            print(f"[error] m3u8 read error: {e}")
             raise ValueError("m3u8 read error")
 
         self.printInfo("got", "index.m3u8", self.URL)
@@ -497,8 +509,8 @@ class DownloadM3U8:
         strong_recovery_rounds = 0
         stagnation_limit = min(12, max(5, max_retry_rounds // 4))
         print(
-            f"\n\t********retry budget={max_retry_rounds} "
-            f"(first_pass_failed={first_pass_failed_count}, total={len(self.fileNameList)})********"
+            f"[retry] budget={max_retry_rounds} "
+            f"first_pass_failed={first_pass_failed_count} total={len(self.fileNameList)}"
         )
 
         for attempt in range(max_retry_rounds):
@@ -509,9 +521,9 @@ class DownloadM3U8:
             self._set_active_identity(attempt + 1)
             timeout_now = self._get_timeout_snapshot()
             print(
-                f"\n\t********attempt: {attempt + 1}/{max_retry_rounds} failed={current_failed_count} "
+                f"[retry] attempt={attempt + 1}/{max_retry_rounds} failed={current_failed_count} "
                 f"identity={self.active_identity_index + 1}/{len(self.identity_pool)} "
-                f"threads={self.round_threads} timeout={timeout_now}s********"
+                f"threads={self.round_threads} timeout={timeout_now}s"
             )
             # 临时存储本次重试开始前的状况
             with self.state_lock:
@@ -530,19 +542,19 @@ class DownloadM3U8:
                 old_threads = self.round_threads
                 self.round_threads = max(8, int(self.round_threads * 0.7))
                 print(
-                    f"\tblocking-like failures={blocking_failures}, "
-                    f"reduce threads {old_threads} -> {self.round_threads}"
+                    f"[retry] blocking_like_failures={blocking_failures} "
+                    f"reduce_threads={old_threads}->{self.round_threads}"
                 )
 
             if next_failed_count > current_failed_count:
-                print("\t????unexpected error: failedList increased????")
+                print("[warn][retry] unexpected state: failed list increased")
                 stagnation_rounds = stagnation_rounds + 1
                 strong_recovery_rounds = 0
             else:
                 recovered_count = current_failed_count - next_failed_count
                 recovered_ratio = recovered_count / max(1, current_failed_count)
                 print(
-                    f"\tretry round result: recovered={recovered_count}/{current_failed_count}, "
+                    f"[retry] round_result recovered={recovered_count}/{current_failed_count} "
                     f"remaining={next_failed_count}"
                 )
                 if recovered_count <= 0:
@@ -562,8 +574,8 @@ class DownloadM3U8:
 
             if stagnation_rounds >= stagnation_limit:
                 print(
-                    f"\tstop retry early: stagnation={stagnation_rounds} "
-                    f">= limit={stagnation_limit}, remaining={next_failed_count}"
+                    f"[retry] stop_early stagnation={stagnation_rounds} "
+                    f"limit={stagnation_limit} remaining={next_failed_count}"
                 )
                 break
 
@@ -584,7 +596,7 @@ class DownloadM3U8:
         self._emit_progress("start", done=0, total=total_segments)
 
         # 下载和写List中的文件
-        print(f"\n\t********total={len(self.fileNameList)}********")
+        print(f"[download] total_segments={len(self.fileNameList)}")
         with ThreadPoolExecutor(max_workers=self.round_threads) as executor:
             for name, url in zip(self.fileNameList, self.fileUrlList):
                 executor.submit(self.__downloadSingle, name, url)
@@ -642,7 +654,7 @@ class DownloadM3U8:
         command = f'"{ffmpegPath}" -allowed_extensions ALL -i "{indexPath}" -c copy "{filePath}"'
         with open(batPath, "w") as file:
             file.write(command)
-        print(f"command = {command}")
+        print(f"[ffmpeg] command={command}")
         if os.path.exists(filePath):
             newPath = os.path.join(self.fileDir, f"origin-{fileName}{extension}")
             os.rename(filePath, newPath)
@@ -664,7 +676,7 @@ class DownloadM3U8:
             final_output_path = os.path.join(self.fileDir, proposed_output_filename)
 
         if not os.path.exists(index_m3u8_path):
-            print(f"Error: Input M3U8 file not found: '{index_m3u8_path}'")
+            print(f"[error][ffmpeg] input m3u8 file not found: '{index_m3u8_path}'")
             return False
         command = [
             self._ffmpeg_exe_path,
@@ -677,8 +689,8 @@ class DownloadM3U8:
             final_output_path,  # 使用处理后的最终输出路径
         ]
         print(
-            f"\n\t********generating {extension} for {base_filename}{extension} "
-            f"to {os.path.basename(final_output_path)}********"
+            f"[ffmpeg] generating {extension} for {base_filename}{extension} "
+            f"-> {os.path.basename(final_output_path)}"
         )
         try:
             subprocess.run(
@@ -688,17 +700,17 @@ class DownloadM3U8:
             )
             return True
         except subprocess.CalledProcessError as e:
-            print(f"\nError: FFmpeg command failed for {base_filename}. Return code: {e.returncode}")
-            print("\n--- FFmpeg STDOUT (Error Context) ---")
+            print(f"[error][ffmpeg] command failed for {base_filename}, code={e.returncode}")
+            print("[error][ffmpeg] stdout:")
             print(self._safe_decode(e.stdout))
-            print("\n--- FFmpeg STDERR (Error Details) ---")
+            print("[error][ffmpeg] stderr:")
             print(self._safe_decode(e.stderr))
             return False
         except FileNotFoundError:
-            print(f"\nError: FFmpeg executable not found at '{self._ffmpeg_exe_path}'.")
+            print(f"[error][ffmpeg] executable not found: '{self._ffmpeg_exe_path}'")
             return False
         except Exception as e:
-            print(f"\nAn unexpected error occurred during processing {base_filename}: {e}")
+            print(f"[error][ffmpeg] unexpected error while processing {base_filename}: {e}")
             return False
 
     @staticmethod

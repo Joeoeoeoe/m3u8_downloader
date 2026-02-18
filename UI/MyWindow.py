@@ -689,11 +689,11 @@ class Worker(QThread):
                     print(f"[task] monitor rules={monitor_config['rules_path']}")
                 if proxy_config["enabled"]:
                     print(
-                        f"[task] proxy=ON {proxy_config['address']}:{proxy_config['port']} "
+                        f"[task] proxy=on {proxy_config['address']}:{proxy_config['port']} "
                         f"user={proxy_config['username'] or '(none)'}"
                     )
                 else:
-                    print("[task] proxy=OFF")
+                    print("[task] proxy=off")
 
                 if not self.monitor:
                     print(f"[task] list mode={list_mode_text}")
@@ -821,7 +821,7 @@ class Worker(QThread):
 
                 # 中断检查
                 if self._is_interrupted:
-                    print("Interrupted Success!")
+                    print("[task] interrupted")
                     return
 
                 print(f"[task] detected m3u8 candidates={len(current_urls)}")
@@ -890,7 +890,7 @@ class Worker(QThread):
                 processed_index = -1
                 for i, i_url in enumerate(current_urls):
                     if self._is_interrupted:
-                        print("Interrupted Success!")
+                        print("[task] interrupted")
                         DownloadJson(d, filePath=json_path).write()
                         return
 
@@ -947,7 +947,7 @@ class Worker(QThread):
                         except ValueError as e:
                             if "m3u8 read error" not in str(e):
                                 raise e
-                            print(f"\n********skip invalid m3u8: {i_url}********\n")
+                            print(f"[warn] skip invalid m3u8: {i_url}")
                             x = None
 
                         if x is not None:
@@ -964,9 +964,9 @@ class Worker(QThread):
                             success_segments = downloaded_segments
                             if success_segments <= 0:
                                 status = "no_downloadable_segments"
-                                print("\n********skip ffmpeg: no downloadable segments********\n")
+                                print("[warn][ffmpeg] skip: no downloadable segments")
                             else:
-                                print(f"\n********starting to generate {file_ext_text}********")
+                                print(f"[ffmpeg] start generating {file_ext_text}")
                                 ffmpeg_ok = x.process_video_with_ffmpeg(this_filename, file_ext_text)
                                 merge_completed = ffmpeg_ok
                                 if ffmpeg_ok:
@@ -980,9 +980,7 @@ class Worker(QThread):
                                             completed_by_tolerance = True
                                             successful_videos += 1
                                             status = "completed_with_tolerated_missing_segments"
-                                            print(
-                                                "\n********merged with tolerated missing segments; mark as completed********\n"
-                                            )
+                                            print("[task] merged with tolerated missing segments; mark as completed")
                                             print(
                                                 f"[download] tolerated missing segments={failed_segments_count}, "
                                                 f"success_ratio={success_ratio:.4f}, log={json_path}"
@@ -990,8 +988,8 @@ class Worker(QThread):
                                         else:
                                             status = "merged_with_missing_segments"
                                             print(
-                                                "\n********merged but missing segments exceed tolerance; "
-                                                "keep task as uncompleted********\n"
+                                                "[warn] merged but missing segments exceed tolerance; "
+                                                "keep task as uncompleted"
                                             )
                                             print(
                                                 f"[download] remaining failed segments={failed_segments_count}, "
@@ -1001,10 +999,10 @@ class Worker(QThread):
                                         completed = True
                                         successful_videos += 1
                                         status = "completed"
-                                        print(f"\n********{file_ext_text} completed generating********\n\n")
+                                        print(f"[success][ffmpeg] {file_ext_text} completed generating")
                                 else:
                                     status = "ffmpeg_failed"
-                                    print("\n********ffmpeg failed; continue next candidate********\n")
+                                    print("[warn][ffmpeg] failed; continue next candidate")
                         else:
                             status = "invalid_m3u8"
                             if success_target is not None:
@@ -1075,7 +1073,7 @@ class Worker(QThread):
                 self._run_completed = True
 
         except Exception as e:
-            print(f"Error in Worker! {e}")
+            print(f"[error][worker] {e}")
         finally:
             self.runCompleted.emit(self._run_completed)
 
@@ -1546,7 +1544,11 @@ class MyWindow(QMainWindow):
 
     @staticmethod
     def _is_completed_line(line_text):
-        return line_text.strip().startswith("completed\t")
+        text = line_text.strip()
+        return (
+            text.startswith("completed\t")
+            or text.startswith("[segment][completed]")
+        )
 
     def _append_to_text_browser(self, text):
         if text == "":
@@ -1578,7 +1580,7 @@ class MyWindow(QMainWindow):
             print(e)
             raise e
 
-        print("\n\t****Config=****")
+        print("[config] loaded from file:")
         for item in config.data.items():
             print(f"{item[0]}:{item[1]}")
 
