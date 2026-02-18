@@ -2,6 +2,28 @@ import os
 import sys
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog
+
+
+def _configure_playwright_browsers_path():
+    if not getattr(sys, "frozen", False):
+        return
+    if str(os.getenv("PLAYWRIGHT_BROWSERS_PATH", "")).strip() != "":
+        return
+
+    search_paths = []
+    app_dir = os.path.dirname(os.path.abspath(sys.executable))
+    search_paths.append(os.path.join(app_dir, "ms-playwright"))
+    local_appdata = str(os.getenv("LOCALAPPDATA", "")).strip()
+    if local_appdata != "":
+        search_paths.append(os.path.join(local_appdata, "ms-playwright"))
+
+    for folder in search_paths:
+        if os.path.isdir(folder):
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = folder
+            break
+
+
+_configure_playwright_browsers_path()
 from UI.MyWindow import MyWindow
 
 

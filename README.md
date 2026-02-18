@@ -195,10 +195,10 @@
 2. 执行：`build.bat`（脚本内部使用 `python -m nuitka --standalone`）
 3. 打包产物输出到：`build/main.dist`
 4. 若运行打包后的程序，确保 `ffmpeg.exe` 与 `main.exe` 位于同一目录（或当前工作目录）
+5. `build.bat` 会自动检测 `%LOCALAPPDATA%\ms-playwright` 中的 `chromium-*` 与 `chromium_headless_shell-*`，并用 `--playwright-include-browser` 只打包这两个运行时，避免体积过大。
 
 ## 已知问题
 
 - **高并发**：并发设置过高可能导致 CPU/内存占用过高或线程异常。
 - **反爬**：部分站点有更严格反爬策略，可能出现识别不到资源或分片请求失败。
 - **cookies**：软件主要针对一些非官方的网站，使用cookies和高级反爬策略的网站较少。
-
