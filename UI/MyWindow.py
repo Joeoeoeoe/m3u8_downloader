@@ -543,6 +543,8 @@ class Worker(QThread):
 
         self.monitor = monitor  # 是否进行监测（是否使用加载的列表）
         self._is_interrupted = False  # 退出标志
+        self._active_monitor = None
+        self._active_monitor_lock = threading.Lock()
         self._active_downloader = None
         self._active_downloader_lock = threading.Lock()
         self._run_completed = False
@@ -567,6 +569,20 @@ class Worker(QThread):
     def _set_active_downloader(self, downloader):
         with self._active_downloader_lock:
             self._active_downloader = downloader
+
+    def _set_active_monitor(self, monitor):
+        with self._active_monitor_lock:
+            self._active_monitor = monitor
+
+    def _request_active_monitor_stop(self):
+        with self._active_monitor_lock:
+            monitor = self._active_monitor
+        if monitor is None:
+            return
+        try:
+            monitor.request_stop()
+        except Exception:
+            pass
 
     def _request_active_downloader_stop(self):
         with self._active_downloader_lock:
@@ -858,8 +874,13 @@ class Worker(QThread):
                             proxy_config=proxy_config,
                             monitor_config=monitor_config,
                             progress_callback=monitor_progress,
+                            stop_checker=self._stop_requested,
                         )
-                        l1, l2 = monitor.simple()
+                        self._set_active_monitor(monitor)
+                        try:
+                            l1, l2 = monitor.simple()
+                        finally:
+                            self._set_active_monitor(None)
                         if self._stop_requested():
                             print("[task] interrupted during monitor stage")
                             return
@@ -1223,6 +1244,7 @@ class Worker(QThread):
     def interrupt(self):
         """用于外部请求中断该线程"""
         self._is_interrupted = True
+        self._request_active_monitor_stop()
         self._request_active_downloader_stop()
 
 

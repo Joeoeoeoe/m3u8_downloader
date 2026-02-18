@@ -12,6 +12,10 @@ import requests
 from playwright.sync_api import sync_playwright
 
 
+class MonitorInterrupted(BaseException):
+    pass
+
+
 class MonitorM3U8:
     PLAYER_SELECTORS = [
         "video",
@@ -153,6 +157,7 @@ class MonitorM3U8:
         proxy_config=None,
         monitor_config=None,
         progress_callback=None,
+        stop_checker=None,
     ):
         self.URL = URL
         self.possible = set()
@@ -173,6 +178,10 @@ class MonitorM3U8:
         self.monitor_headers = self._build_monitor_headers()
         self.verbose_log = self._to_bool(os.getenv("M3U8_MONITOR_VERBOSE", ""), False)
         self.progress_callback = progress_callback if callable(progress_callback) else None
+        self.stop_checker = stop_checker if callable(stop_checker) else None
+        self._manual_stop_requested = False
+        self._stop_logged = False
+        self._interrupt_check_interval_ms = 120
         self.last_monitor_error = ""
         self.last_blocked_by_client = False
         self.session_hints = {
@@ -281,6 +290,26 @@ class MonitorM3U8:
             self.progress_callback(payload)
         except Exception:
             pass
+
+    def request_stop(self):
+        self._manual_stop_requested = True
+
+    def _is_stop_requested(self):
+        external_requested = False
+        if self.stop_checker is not None:
+            try:
+                external_requested = bool(self.stop_checker())
+            except Exception:
+                external_requested = False
+        return self._manual_stop_requested or external_requested
+
+    def _raise_if_stopped(self):
+        if not self._is_stop_requested():
+            return
+        if not self._stop_logged:
+            self._stop_logged = True
+            self._log_monitor("interrupt requested, stop probing")
+        raise MonitorInterrupted("monitor interrupted")
 
     def _log_verbose(self, message):
         if self.verbose_log:
@@ -1670,6 +1699,7 @@ class MonitorM3U8:
         return list(dict.fromkeys(found))
 
     def _fallback_probe_with_requests(self):
+        self._raise_if_stopped()
         if len(self.possible) > 0:
             return 0
         before = len(self.possible)
@@ -1688,30 +1718,36 @@ class MonitorM3U8:
 
             headers = dict(self.monitor_headers)
             headers["referer"] = self.URL
-            response = session.get(self.URL, headers=headers, timeout=(8, 12))
+            self._raise_if_stopped()
+            response = session.get(self.URL, headers=headers, timeout=(4, 5))
             response.raise_for_status()
             body = response.text
 
             for found_url in self._extract_candidate_urls_from_text(body, self.URL):
+                self._raise_if_stopped()
                 if self._is_m3u8_url(found_url):
                     self._add_m3u8_candidate(found_url, referer=self.URL)
                 else:
                     self._add_page_candidate(found_url)
 
             for script_url in self._extract_script_sources(body, self.URL)[:script_probe_limit]:
+                self._raise_if_stopped()
                 try:
                     script_headers = dict(headers)
                     script_headers["referer"] = self.URL
-                    js_resp = session.get(script_url, headers=script_headers, timeout=(6, 10))
+                    js_resp = session.get(script_url, headers=script_headers, timeout=(3, 4))
                     js_resp.raise_for_status()
                     js_body = js_resp.text
                 except Exception:
                     continue
                 for found_url in self._extract_candidate_urls_from_text(js_body, script_url):
+                    self._raise_if_stopped()
                     if self._is_m3u8_url(found_url):
                         self._add_m3u8_candidate(found_url, referer=script_url)
                     else:
                         self._add_page_candidate(found_url)
+        except MonitorInterrupted:
+            raise
         except Exception as exc:
             self._log_monitor(f"fallback(requests) failed: {exc}")
         finally:
@@ -1786,6 +1822,7 @@ class MonitorM3U8:
             return False
 
     def _extract_candidates_from_page(self, page):
+        self._raise_if_stopped()
         try:
             page_url = self._normalize_url(page.url) or self.URL
             body = page.content()
@@ -1799,6 +1836,7 @@ class MonitorM3U8:
                 self._add_page_candidate(found_url)
 
     def _recover_page_if_needed(self, page, stable_url):
+        self._raise_if_stopped()
         try:
             raw_page_url = str(getattr(page, "url", ""))
         except Exception:
@@ -1810,7 +1848,7 @@ class MonitorM3U8:
         if self._looks_like_blocked_url(raw_page_url):
             self.last_blocked_by_client = True
             try:
-                page.goto(stable, wait_until="domcontentloaded", timeout=12000)
+                page.goto(stable, wait_until="domcontentloaded", timeout=3500)
             except Exception:
                 pass
             return
@@ -1826,14 +1864,16 @@ class MonitorM3U8:
         # 点击后发生跨站跳转时优先回到原页面，避免被广告页“带跑偏”
         self._add_page_candidate(current)
         try:
-            page.go_back(wait_until="domcontentloaded", timeout=5000)
+            page.go_back(wait_until="domcontentloaded", timeout=2500)
         except Exception:
             try:
-                page.goto(stable, wait_until="domcontentloaded", timeout=12000)
+                page.goto(stable, wait_until="domcontentloaded", timeout=3500)
             except Exception:
                 pass
 
     def handle_response(self, response):
+        if self._is_stop_requested():
+            return
         response_url = self._normalize_url(getattr(response, "url", ""))
         referer = ""
         status = getattr(response, "status", 0)
@@ -1883,6 +1923,8 @@ class MonitorM3U8:
                 self._add_page_candidate(found_url)
 
     def handle_request(self, request):
+        if self._is_stop_requested():
+            return
         req_url = self._normalize_url(getattr(request, "url", ""))
         if req_url == "":
             return
@@ -1919,6 +1961,7 @@ class MonitorM3U8:
         wait_after_click_ms=250,
     ):
         for selector in selectors:
+            self._raise_if_stopped()
             try:
                 locator = target.locator(selector)
                 count = min(locator.count(), max_per_selector)
@@ -1926,6 +1969,7 @@ class MonitorM3U8:
                 continue
 
             for i in range(count):
+                self._raise_if_stopped()
                 try:
                     element = locator.nth(i)
                     if not element.is_visible(timeout=visible_timeout_ms):
@@ -1940,6 +1984,7 @@ class MonitorM3U8:
         return False
 
     def _try_play_media_elements(self, target):
+        self._raise_if_stopped()
         script = """
             (elements) => {
                 let played = 0;
@@ -1962,6 +2007,7 @@ class MonitorM3U8:
             return 0
 
     def _collect_recursive_candidates(self, page):
+        self._raise_if_stopped()
         self._add_page_candidate(page.url)
 
         try:
@@ -2234,6 +2280,7 @@ class MonitorM3U8:
         deadline = time.time() + timeout_ms / 1000.0
         poll_seconds = max(0.05, self._to_int(poll_ms, 150, 50, 1000) / 1000.0)
         while time.time() < deadline:
+            self._raise_if_stopped()
             if self._selector_condition_satisfied(
                 page,
                 selectors,
@@ -2243,6 +2290,7 @@ class MonitorM3U8:
             ):
                 return True
             self._pause(page, int(poll_seconds * 1000))
+        self._raise_if_stopped()
         return self._selector_condition_satisfied(
             page,
             selectors,
@@ -2256,29 +2304,42 @@ class MonitorM3U8:
             return fallback
         return self._to_int(raw_value, fallback)
 
-    @staticmethod
-    def _pause(page, wait_ms):
+    def _pause(self, page, wait_ms):
         duration_ms = max(0, int(wait_ms))
         if duration_ms <= 0:
             return
-        try:
-            if page is not None:
-                page.wait_for_timeout(duration_ms)
-                return
-        except Exception:
-            pass
-        time.sleep(duration_ms / 1000.0)
+        while duration_ms > 0:
+            self._raise_if_stopped()
+            chunk_ms = min(duration_ms, self._interrupt_check_interval_ms)
+            try:
+                if page is not None:
+                    page.wait_for_timeout(chunk_ms)
+                else:
+                    time.sleep(chunk_ms / 1000.0)
+            except Exception:
+                time.sleep(chunk_ms / 1000.0)
+            duration_ms -= chunk_ms
+
+    def _responsive_timeout_ms(self, timeout_ms, interrupt_cap_ms):
+        value = self._to_int(timeout_ms, interrupt_cap_ms, 100, 120000)
+        if self.stop_checker is not None:
+            return min(value, max(100, int(interrupt_cap_ms)))
+        return value
 
     def _action_wait(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         wait_ms = self._resolve_wait_ms(action, "ms", 300, 0, 30000)
         if wait_ms > 0:
             self._pause(page, wait_ms)
 
     def _action_play_media(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
+            self._raise_if_stopped()
             self._try_play_media_elements(target)
 
     def _action_click(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         selectors = self._resolve_action_selectors(action)
         if len(selectors) == 0:
             return
@@ -2288,10 +2349,14 @@ class MonitorM3U8:
         max_per_selector = self._to_int(self._action_arg(action, "max_per_selector", 2), 2, 1, 20)
         visible_timeout_ms = self._to_int(self._action_arg(action, "visible_timeout_ms", 600), 600, 100, 10000)
         click_timeout_ms = self._to_int(self._action_arg(action, "click_timeout_ms", 1400), 1400, 100, 20000)
+        visible_timeout_ms = self._responsive_timeout_ms(visible_timeout_ms, 1200)
+        click_timeout_ms = self._responsive_timeout_ms(click_timeout_ms, 1800)
         wait_after_click_ms = self._resolve_wait_ms(action, "wait_after_click_ms", 250, 0, 10000)
 
         for _ in range(repeat):
+            self._raise_if_stopped()
             for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
+                self._raise_if_stopped()
                 self._try_click_selectors(
                     target,
                     selectors,
@@ -2306,6 +2371,7 @@ class MonitorM3U8:
                 self._pause(page, wait_ms)
 
     def _action_hover(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         selectors = self._resolve_action_selectors(action)
         if len(selectors) == 0:
             return
@@ -2314,10 +2380,14 @@ class MonitorM3U8:
         max_per_selector = self._to_int(self._action_arg(action, "max_per_selector", 1), 1, 1, 20)
         visible_timeout_ms = self._to_int(self._action_arg(action, "visible_timeout_ms", 600), 600, 100, 10000)
         hover_timeout_ms = self._to_int(self._action_arg(action, "hover_timeout_ms", 1200), 1200, 100, 20000)
+        visible_timeout_ms = self._responsive_timeout_ms(visible_timeout_ms, 1200)
+        hover_timeout_ms = self._responsive_timeout_ms(hover_timeout_ms, 1800)
         wait_ms = self._resolve_wait_ms(action, "wait_ms", 200, 0, 30000)
 
         for _ in range(repeat):
+            self._raise_if_stopped()
             for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
+                self._raise_if_stopped()
                 for selector in selectors:
                     try:
                         locator = target.locator(selector)
@@ -2326,6 +2396,7 @@ class MonitorM3U8:
                         continue
 
                     for index in range(count):
+                        self._raise_if_stopped()
                         try:
                             element = locator.nth(index)
                             if not element.is_visible(timeout=visible_timeout_ms):
@@ -2339,6 +2410,7 @@ class MonitorM3U8:
                 self._pause(page, wait_ms)
 
     def _action_fill(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         selectors = self._resolve_action_selectors(action)
         if len(selectors) == 0:
             return
@@ -2347,10 +2419,13 @@ class MonitorM3U8:
         index = self._to_int(self._action_arg(action, "index", 0), 0, 0)
         fill_timeout_ms = self._to_int(self._action_arg(action, "fill_timeout_ms", 2500), 2500, 100, 30000)
         visible_timeout_ms = self._to_int(self._action_arg(action, "visible_timeout_ms", 600), 600, 100, 10000)
+        fill_timeout_ms = self._responsive_timeout_ms(fill_timeout_ms, 2400)
+        visible_timeout_ms = self._responsive_timeout_ms(visible_timeout_ms, 1200)
         require_visible = self._to_bool(self._action_arg(action, "require_visible", True), True)
         submit_key = str(self._action_arg(action, "submit_key", "")).strip()
 
         for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
+            self._raise_if_stopped()
             for selector in selectors:
                 try:
                     locator = target.locator(selector)
@@ -2372,11 +2447,13 @@ class MonitorM3U8:
                     continue
 
     def _action_wait_for_selector(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         selectors = self._resolve_action_selectors(action)
         if len(selectors) == 0:
             return
 
         timeout_ms = self._to_int(self._action_arg(action, "timeout_ms", 5000), 5000, 100, 60000)
+        timeout_ms = self._responsive_timeout_ms(timeout_ms, 3500)
         state = self._wait_selector_state(self._action_arg(action, "state", "visible"), "visible")
         match_mode = self._match_mode(self._action_arg(action, "match", "any"), "any")
         target_mode = self._action_arg(action, "target", "page")
@@ -2488,7 +2565,9 @@ class MonitorM3U8:
         return False
 
     def _action_wait_group(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         timeout_ms = self._to_int(self._action_arg(action, "timeout_ms", 8000), 8000, 100, 120000)
+        timeout_ms = self._responsive_timeout_ms(timeout_ms, 5000)
         poll_ms = self._to_int(self._action_arg(action, "poll_ms", 150), 150, 50, 1000)
         mode = self._match_mode(self._action_arg(action, "mode", "all"), "all")
         group_actions = self._action_arg(action, "group_actions", [])
@@ -2504,6 +2583,7 @@ class MonitorM3U8:
         poll_seconds = max(0.05, poll_ms / 1000.0)
 
         while time.time() < deadline:
+            self._raise_if_stopped()
             now = time.time()
             for index, condition in enumerate(compiled):
                 if condition_done[index]:
@@ -2523,11 +2603,14 @@ class MonitorM3U8:
             self._pause(page, int(poll_seconds * 1000))
 
     def _action_wait_for_load_state(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         state = self._wait_until_value(self._action_arg(action, "state"), default="networkidle")
         timeout_ms = self._to_int(self._action_arg(action, "timeout_ms", 8000), 8000, 100, 60000)
+        timeout_ms = self._responsive_timeout_ms(timeout_ms, 3500)
         page.wait_for_load_state(state, timeout=timeout_ms)
 
     def _action_goto(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         raw_url = str(self._action_arg(action, "url", "")).strip()
         if raw_url == "":
             return
@@ -2536,9 +2619,11 @@ class MonitorM3U8:
             return
         wait_until = self._wait_until_value(self._action_arg(action, "wait_until"), default="domcontentloaded")
         timeout_ms = self._to_int(self._action_arg(action, "timeout_ms", 18000), 18000, 100, 120000)
+        timeout_ms = self._responsive_timeout_ms(timeout_ms, 5000)
         page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
 
     def _action_evaluate(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         script = self._action_arg(action, "script")
         if not isinstance(script, str) or script.strip() == "":
             return
@@ -2554,6 +2639,7 @@ class MonitorM3U8:
             return
 
         for target in self._iter_action_targets(page, self._action_arg(action, "target", "page")):
+            self._raise_if_stopped()
             try:
                 if self._action_has_arg(action, "arg"):
                     target.eval_on_selector_all(selector, script, arg)
@@ -2564,6 +2650,7 @@ class MonitorM3U8:
                 continue
 
     def _action_scroll(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         deltas = self._action_arg(action, "deltas", [])
         if not isinstance(deltas, list) or len(deltas) == 0:
             deltas = [self._action_arg(action, "y", 240)]
@@ -2577,6 +2664,7 @@ class MonitorM3U8:
         )
 
         for delta in deltas:
+            self._raise_if_stopped()
             try:
                 page.mouse.wheel(wheel_x, self._to_int(delta, 0))
             except Exception:
@@ -2585,6 +2673,7 @@ class MonitorM3U8:
                 self._pause(page, wait_after_scroll_ms)
 
     def _action_mouse_click(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         viewport = page.viewport_size or {"width": 1280, "height": 720}
         position = self._action_arg(action, "position", {})
         if not isinstance(position, dict):
@@ -2603,6 +2692,7 @@ class MonitorM3U8:
         page.mouse.click(x, y, button=button, click_count=click_count, delay=delay_ms)
 
     def _action_press(self, page, action, stable_url, before_count):
+        self._raise_if_stopped()
         key = str(self._action_arg(action, "key", "")).strip()
         if key == "":
             return
@@ -2614,6 +2704,7 @@ class MonitorM3U8:
             self._log_verbose(f"rule log: {message}")
 
     def _run_configured_interaction_action(self, page, action, stable_url):
+        self._raise_if_stopped()
         if not isinstance(action, dict):
             return
 
@@ -2628,15 +2719,19 @@ class MonitorM3U8:
         before = len(self.possible)
         try:
             handler(page, action, stable_url, before)
+        except MonitorInterrupted:
+            raise
         except Exception as exc:
             self._log_monitor(f"rule action failed ({action_type}): {exc}")
 
     def _try_trigger_player(self, page, interaction_stage=1, attempt=1, tries=1):
+        self._raise_if_stopped()
         stable_url = self._normalize_url(page.url) or self.URL
         actions = list(self.active_interaction_rule.get("actions", []))
         if len(actions) == 0:
             return
         for action in actions:
+            self._raise_if_stopped()
             if not self._action_enabled_for_interaction_stage(
                 action,
                 interaction_stage,
@@ -2650,6 +2745,7 @@ class MonitorM3U8:
 
     def MonitorUrl(self):
         def __launch_browser(playwright_driver, launch_kwargs):
+            self._raise_if_stopped()
             last_error = None
             try:
                 browser = playwright_driver.chromium.launch(**launch_kwargs)
@@ -2663,6 +2759,7 @@ class MonitorM3U8:
         chromium_executable_logged = False
 
         def __monitor_single(playwright_driver, interaction_stage=1, attempt=1, tries=1):
+            self._raise_if_stopped()
             nonlocal chromium_executable_logged
             launch_args = [
                 "--disable-blink-features=AutomationControlled",
@@ -2693,10 +2790,12 @@ class MonitorM3U8:
             browser = None
             context = None
             try:
+                self._raise_if_stopped()
                 self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=1, steps=8, phase="launch")
                 browser = __launch_browser(playwright_driver, launch_kwargs)
                 self._log_verbose("launch browser actual=chromium")
                 self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=2, steps=8, phase="browser")
+                self._raise_if_stopped()
                 context = browser.new_context(
                     user_agent=self.monitor_headers.get("user-agent", self._default_user_agent()),
                     locale="zh-CN",
@@ -2715,18 +2814,26 @@ class MonitorM3U8:
                     context.set_extra_http_headers(extra_headers)
 
                 self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=3, steps=8, phase="context")
+                self._raise_if_stopped()
                 page = context.new_page()
-                page.set_default_timeout(12000)
+                page.set_default_timeout(self._responsive_timeout_ms(12000, 4000))
                 page.on("response", self.handle_response)
                 page.on("request", self.handle_request)
                 page.on("requestfailed", self.handle_request_failed)
 
                 def _on_popup(popup):
+                    if self._is_stop_requested():
+                        return
                     popup.on("response", self.handle_response)
                     popup.on("request", self.handle_request)
                     popup.on("requestfailed", self.handle_request_failed)
                     try:
-                        popup.wait_for_load_state("domcontentloaded", timeout=5000)
+                        popup.wait_for_load_state(
+                            "domcontentloaded",
+                            timeout=self._responsive_timeout_ms(5000, 1800),
+                        )
+                    except MonitorInterrupted:
+                        raise
                     except Exception:
                         pass
                     popup_url = self._normalize_url(getattr(popup, "url", ""))
@@ -2741,13 +2848,24 @@ class MonitorM3U8:
                 context.on("page", _on_popup)
 
                 self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=4, steps=8, phase="goto")
-                page.goto(self.URL, wait_until="domcontentloaded", timeout=18000)
+                self._raise_if_stopped()
+                page.goto(
+                    self.URL,
+                    wait_until="domcontentloaded",
+                    timeout=self._responsive_timeout_ms(18000, 5500),
+                )
                 try:
-                    page.wait_for_load_state("networkidle", timeout=8000)
+                    page.wait_for_load_state(
+                        "networkidle",
+                        timeout=self._responsive_timeout_ms(8000, 2500),
+                    )
+                except MonitorInterrupted:
+                    raise
                 except Exception:
                     pass
 
                 self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=5, steps=8, phase="extract")
+                self._raise_if_stopped()
                 self._extract_candidates_from_page(page)
                 if self.interaction_enabled:
                     self._try_trigger_player(
@@ -2759,8 +2877,10 @@ class MonitorM3U8:
                 self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=6, steps=8, phase="interaction")
 
                 if self.recursion_depth > 1:
+                    self._raise_if_stopped()
                     self._collect_recursive_candidates(page)
 
+                self._raise_if_stopped()
                 if self._is_blocked_page(page):
                     self.last_blocked_by_client = True
                     self.last_monitor_error = "ERR_BLOCKED_BY_CLIENT"
@@ -2768,6 +2888,7 @@ class MonitorM3U8:
                     self._extract_candidates_from_page(page)
 
                 self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=7, steps=8, phase="hints")
+                self._raise_if_stopped()
                 self._update_session_hints(context, page)
                 self._emit_progress("attempt_step", attempt=attempt, tries=tries, step=8, steps=8, phase="done")
             finally:
@@ -2783,6 +2904,7 @@ class MonitorM3U8:
                         pass
 
         monitor_started_at = time.perf_counter()
+        self._raise_if_stopped()
         self._log_monitor(f"start url={self.URL}")
         self._log_monitor(
             f"config headless={self.headless} recursion_depth={self.recursion_depth} "
@@ -2824,66 +2946,78 @@ class MonitorM3U8:
 
         tries = self.monitor_tries
         self._emit_progress("start", tries=tries, done=0)
-        with sync_playwright() as p:
-            try:
-                self._log_monitor(f"chromium executable={p.chromium.executable_path}")
-            except Exception:
-                self._log_monitor("chromium executable=(unknown)")
-            for attempt in range(tries):
-                attempt_no = attempt + 1
-                attempt_started_at = time.perf_counter()
-                before = len(self.possible)
-                interaction_stage = 0
-                if self.interaction_enabled:
-                    interaction_stage = 1 if attempt == 0 else 2
-
-                stage_name = "first-pass" if interaction_stage == 1 else "retry-pass"
-                if interaction_stage == 0:
-                    stage_name = "disabled"
-                self._log_monitor(
-                    f"attempt {attempt_no}/{tries} start "
-                    f"strategy={stage_name} channel=chromium"
-                )
-                self._emit_progress("attempt_start", attempt=attempt_no, tries=tries, done=attempt_no - 1)
+        try:
+            with sync_playwright() as p:
                 try:
-                    __monitor_single(
-                        p,
-                        interaction_stage=interaction_stage,
-                        attempt=attempt_no,
-                        tries=tries,
+                    self._log_monitor(f"chromium executable={p.chromium.executable_path}")
+                except Exception:
+                    self._log_monitor("chromium executable=(unknown)")
+                for attempt in range(tries):
+                    self._raise_if_stopped()
+                    attempt_no = attempt + 1
+                    attempt_started_at = time.perf_counter()
+                    before = len(self.possible)
+                    interaction_stage = 0
+                    if self.interaction_enabled:
+                        interaction_stage = 1 if attempt == 0 else 2
+
+                    stage_name = "first-pass" if interaction_stage == 1 else "retry-pass"
+                    if interaction_stage == 0:
+                        stage_name = "disabled"
+                    self._log_monitor(
+                        f"attempt {attempt_no}/{tries} start "
+                        f"strategy={stage_name} channel=chromium"
                     )
-                except Exception as exc:
-                    self.last_monitor_error = str(exc)
+                    self._emit_progress("attempt_start", attempt=attempt_no, tries=tries, done=attempt_no - 1)
+                    try:
+                        __monitor_single(
+                            p,
+                            interaction_stage=interaction_stage,
+                            attempt=attempt_no,
+                            tries=tries,
+                        )
+                    except MonitorInterrupted:
+                        raise
+                    except Exception as exc:
+                        self.last_monitor_error = str(exc)
+                        elapsed = time.perf_counter() - attempt_started_at
+                        self._log_monitor(
+                            f"attempt {attempt_no}/{tries} failed in {self._fmt_seconds(elapsed)}: {exc}"
+                        )
+                        self._emit_progress(
+                            "attempt_done",
+                            attempt=attempt_no,
+                            tries=tries,
+                            done=attempt_no,
+                            success=False,
+                        )
+                        continue
+
+                    after = len(self.possible)
+                    new_candidates = max(0, after - before)
                     elapsed = time.perf_counter() - attempt_started_at
                     self._log_monitor(
-                        f"attempt {attempt_no}/{tries} failed in {self._fmt_seconds(elapsed)}: {exc}"
+                        f"attempt {attempt_no}/{tries} done in {self._fmt_seconds(elapsed)} "
+                        f"new_m3u8={new_candidates} total={after}"
                     )
+                    if self.last_blocked_by_client:
+                        self._log_monitor("blocked-by-client detected; continue with retry strategy")
                     self._emit_progress(
                         "attempt_done",
                         attempt=attempt_no,
                         tries=tries,
                         done=attempt_no,
-                        success=False,
+                        success=True,
                     )
-                    continue
+        except MonitorInterrupted:
+            monitor_elapsed = time.perf_counter() - monitor_started_at
+            self._log_monitor(
+                f"interrupted in {self._fmt_seconds(monitor_elapsed)} "
+                f"possible={len(self.possible)} predicted={len(self.predicted)}"
+            )
+            return list(self._ordered_m3u8_lists())
 
-                after = len(self.possible)
-                new_candidates = max(0, after - before)
-                elapsed = time.perf_counter() - attempt_started_at
-                self._log_monitor(
-                    f"attempt {attempt_no}/{tries} done in {self._fmt_seconds(elapsed)} "
-                    f"new_m3u8={new_candidates} total={after}"
-                )
-                if self.last_blocked_by_client:
-                    self._log_monitor("blocked-by-client detected; continue with retry strategy")
-                self._emit_progress(
-                    "attempt_done",
-                    attempt=attempt_no,
-                    tries=tries,
-                    done=attempt_no,
-                    success=True,
-                )
-
+        self._raise_if_stopped()
         if len(self.possible) == 0 and self.last_monitor_error != "":
             self._log_monitor(f"ended with last error: {self.last_monitor_error}")
         fallback_added = 0
@@ -2919,6 +3053,7 @@ class MonitorM3U8:
         return same_site + cross_site
 
     def _run_controlled_recursion(self, possible, predicted):
+        self._raise_if_stopped()
         if self.recursion_depth <= 1:
             return possible, predicted
 
@@ -2944,6 +3079,7 @@ class MonitorM3U8:
             f"recursion start depth={self.recursion_depth} seeds={len(queue)} max_nodes={max_nodes}"
         )
         while queue and processed_nodes < max_nodes:
+            self._raise_if_stopped()
             target, level = queue.pop(0)
             if level > self.recursion_depth:
                 continue
@@ -2965,6 +3101,7 @@ class MonitorM3U8:
                 recursion_depth=(2 if level < self.recursion_depth else 1),
                 proxy_config=self.proxy_config,
                 monitor_config=self.monitor_config,
+                stop_checker=self.stop_checker,
             )
             child_possible, child_predicted = child.simple(run_recursive=False)
             possible.extend(child_possible)
@@ -3009,7 +3146,11 @@ class MonitorM3U8:
         }
 
     def simple(self, run_recursive=True):
-        possible, predicted = self.MonitorUrl()
+        try:
+            self._raise_if_stopped()
+            possible, predicted = self.MonitorUrl()
+        except MonitorInterrupted:
+            return list(self._ordered_m3u8_lists())
         if possible == [] and predicted == []:
             self._log_monitor("no resource found for current url")
         else:
@@ -3020,15 +3161,18 @@ class MonitorM3U8:
             self._print_candidate_preview("predicted", predicted)
 
         if run_recursive and self.recursion_depth > 1:
-            possible, predicted = self._run_controlled_recursion(possible, predicted)
-            possible = list(dict.fromkeys(possible))
-            predicted = list(dict.fromkeys(predicted))
-            self._log_monitor(
-                f"resource summary after recursion depth={self.recursion_depth} "
-                f"possible={len(possible)} predicted={len(predicted)}"
-            )
-            if self.verbose_log:
-                self._print_candidate_preview("possible", possible)
-                self._print_candidate_preview("predicted", predicted)
+            try:
+                possible, predicted = self._run_controlled_recursion(possible, predicted)
+                possible = list(dict.fromkeys(possible))
+                predicted = list(dict.fromkeys(predicted))
+                self._log_monitor(
+                    f"resource summary after recursion depth={self.recursion_depth} "
+                    f"possible={len(possible)} predicted={len(predicted)}"
+                )
+                if self.verbose_log:
+                    self._print_candidate_preview("possible", possible)
+                    self._print_candidate_preview("predicted", predicted)
+            except MonitorInterrupted:
+                return [list(dict.fromkeys(possible)), list(dict.fromkeys(predicted))]
 
         return [possible, predicted]
